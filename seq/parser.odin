@@ -98,7 +98,7 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 			parse_error(p, "event pool full")
 			return false
 		}
-		event_get(sequencer, idx).kind = Timeline{}
+		event_get(sequencer, idx).kind = Timeline{rate = 1}
 
 		p.symbols[name] = idx
 
@@ -173,6 +173,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 	if !ok_b {parse_error(p, "expected time"); return false}
 
 	trans: i32 = 0
+	rate: f32 = 1
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) {
@@ -190,6 +191,10 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected transposition"); return false}
 			trans = i32(v)
+		case "rate":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected rate"); return false}
+			rate = v
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
@@ -203,7 +208,10 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 	add_event(
 		sequencer,
 		parent,
-		Event{beat = beat, kind = Timeline{first = target, transposition = trans}},
+		Event {
+			beat = beat,
+			kind = Timeline{first = target, transposition = trans, rate = rate},
+		},
 	)
 	return true
 }

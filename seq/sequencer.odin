@@ -33,7 +33,8 @@ Timeline :: struct {
 	cursor:        Event_Index,
 	active_head:   Event_Index,
 	channel:       i32,
-	transposition: i32, // semitones; accumulates from parent to child
+	transposition: i32, // semitones; accumulates additively from parent to child
+	rate:          f32, // time-scale multiplier; accumulates multiplicatively
 }
 
 Event_Kind :: union {
@@ -236,6 +237,7 @@ play_timeline :: proc(
 			new_timeline.cursor = new_timeline.first
 			new_timeline.active_head = NIL_EVENT
 			new_timeline.transposition += timeline.transposition
+			new_timeline.rate *= timeline.rate
 			new_event.active_next = spawn_head
 			spawn_head = new_idx
 		}
@@ -262,20 +264,24 @@ play_timeline :: proc(
 				finished = true
 			}
 		case Timeline:
-			sub_head := play_timeline(sequencer, current, local_time - current_event.beat)
+			child := &current_event.kind.(Timeline)
+			sub_head := play_timeline(
+				sequencer,
+				current,
+				(local_time - current_event.beat) * child.rate,
+			)
 			if sub_head != NIL_EVENT {
 				sub_tail := sub_head
 				walker := sub_head
 				for walker != NIL_EVENT {
 					walker_event := event_get(sequencer, walker)
-					walker_event.beat += current_event.beat
+					walker_event.beat = walker_event.beat / child.rate + current_event.beat
 					sub_tail = walker
 					walker = walker_event.active_next
 				}
 				event_get(sequencer, sub_tail).active_next = spawn_head
 				spawn_head = sub_head
 			}
-			child := &current_event.kind.(Timeline)
 			finished = child.cursor == NIL_EVENT && child.active_head == NIL_EVENT
 		}
 

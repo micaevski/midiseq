@@ -35,10 +35,16 @@ PART_B = [
 
 NOTE = [  note( 0 C5 vel=85 dur=0.3 )]
 
-SONG = [
+PART = [ 
     NOTE(0)
-    NOTE(0.5, trans=3)
-    SONG(3, trans=5)
+    NOTE(0.5 trans=2)
+    NOTE(1 trans=4)
+]
+
+SONG = [
+    PART(0)
+    PART(4 trans=5 rate=2)
+    SONG(6)
 ]
 
 
