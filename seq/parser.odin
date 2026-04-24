@@ -38,14 +38,45 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Event_Index, 
 	// balancing brackets.
 	if !pass_1(sequencer, &parser) do return NIL_EVENT, false
 
-	// Pass 2: parse each body and populate its Timeline.
+	// Pass 2: parse each body and populate its Timeline. References
+	// stash the target's index in their `first` field (unresolved).
 	parser.pos = 0
 	parser.line = 1
 	parser.col = 1
 	root = pass_2(sequencer, &parser)
 	if root == NIL_EVENT do return NIL_EVENT, false
 
+	// Pass 3: every top-level body is populated now, so we can rewrite
+	// each reference's stashed target-index into the target's actual
+	// children chain head.
+	resolve_references(sequencer, &parser)
+
 	return root, true
+}
+
+
+// For each top-level timeline, walk its direct children. Any child that
+// is a Timeline is a reference, and its `first` currently holds the
+// target's event index. Replace it with the target's children chain head.
+@(private)
+resolve_references :: proc(sequencer: ^Sequencer, p: ^Parser) {
+	for _, top_index in p.symbols {
+		top_event := event_get(sequencer, top_index)
+		top_timeline, ok := top_event.kind.(Timeline)
+		if !ok do continue
+
+		child_index := top_timeline.first
+		for child_index != NIL_EVENT {
+			child := event_get(sequencer, child_index)
+			next := child.next
+			if _, is_timeline := child.kind.(Timeline); is_timeline {
+				ref_timeline := &child.kind.(Timeline)
+				target := ref_timeline.first
+				ref_timeline.first = event_get(sequencer, target).kind.(Timeline).first
+			}
+			child_index = next
+		}
+	}
 }
 
 
@@ -142,12 +173,10 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 	if !ok_b {parse_error(p, "expected time"); return false}
 	if !expect(p, ')') do return false
 
-	target_first := event_get(sequencer, target).kind.(Timeline).first
-	add_event(
-		sequencer,
-		parent,
-		Event{beat = beat, kind = Timeline{first = target_first}},
-	)
+	// Stash the target's index in `first`. It gets rewritten to the
+	// target's actual children chain head by resolve_references after
+	// every top-level body has been parsed.
+	add_event(sequencer, parent, Event{beat = beat, kind = Timeline{first = target}})
 	return true
 }
 

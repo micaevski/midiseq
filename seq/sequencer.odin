@@ -156,16 +156,16 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	if spawn_head == NIL_EVENT do return
 
 	root_event := event_get(sequencer, sequencer.root)
-	root_tl := &root_event.kind.(Timeline)
+	root_timeline := &root_event.kind.(Timeline)
 
 	tail := spawn_head
 	for {
-		e := event_get(sequencer, tail)
-		if e.active_next == NIL_EVENT do break
-		tail = e.active_next
+		event := event_get(sequencer, tail)
+		if event.active_next == NIL_EVENT do break
+		tail = event.active_next
 	}
-	event_get(sequencer, tail).active_next = root_tl.active_head
-	root_tl.active_head = spawn_head
+	event_get(sequencer, tail).active_next = root_timeline.active_head
+	root_timeline.active_head = spawn_head
 }
 
 // The root has nothing pending and nothing sounding.
@@ -226,9 +226,9 @@ play_timeline :: proc(
 			timeline.active_head = new_idx
 			sink_note_on(&sequencer.sink, timeline.channel, k.number, k.velocity)
 		case Timeline:
-			inst_tl := &new_event.kind.(Timeline)
-			inst_tl.cursor = inst_tl.first
-			inst_tl.active_head = NIL_EVENT
+			new_timeline := &new_event.kind.(Timeline)
+			new_timeline.cursor = new_timeline.first
+			new_timeline.active_head = NIL_EVENT
 			new_event.active_next = spawn_head
 			spawn_head = new_idx
 		}
@@ -256,10 +256,10 @@ play_timeline :: proc(
 				sub_tail := sub_head
 				walker := sub_head
 				for walker != NIL_EVENT {
-					we := event_get(sequencer, walker)
-					we.beat += current_event.beat
+					walker_event := event_get(sequencer, walker)
+					walker_event.beat += current_event.beat
 					sub_tail = walker
-					walker = we.active_next
+					walker = walker_event.active_next
 				}
 				event_get(sequencer, sub_tail).active_next = spawn_head
 				spawn_head = sub_head
