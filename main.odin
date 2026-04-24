@@ -1,17 +1,43 @@
 package main
 
-import rl "vendor:raylib"
 import "seq"
+import rl "vendor:raylib"
 
 
 SOURCE :: `
-A = [
-    (0,   0.4, (60, 100)),
-    (0.5, 0.4, (62, 100)),
-    (1,   0.4, (64, 100)),
-    (1.5, 0.4, (67, 100)),
-    (2, A)
+CHORD_A = [
+    note( 0 C5 vel=85 dur=0.3 )
+    note( 0 E5 vel=85 dur=0.3 )
+    note( 0 G5 vel=85 dur=0.3 )
 ]
+
+CHORD_B = [
+    note( 0 F5 vel=85 dur=0.3 )
+    note( 0 A5 vel=85 dur=0.3 )
+    note( 0 C6 vel=85 dur=0.3 )
+]
+
+PART_A = [
+    CHORD_A(0)
+    CHORD_A(1)
+    CHORD_A(2)
+    CHORD_A(3)
+    PART_B(2)
+]
+
+PART_B = [
+    CHORD_B(0)
+    CHORD_B(1)
+    CHORD_B(2)
+    CHORD_B(3)
+    PART_A(4)
+]
+
+SONG = [
+    PART_A(0)
+]
+
+
 `
 
 

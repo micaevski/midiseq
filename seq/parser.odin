@@ -101,88 +101,110 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Event_Index {
 parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
 	if !expect(p, '[') do return false
 
-	skip_ws(p)
-	if p.pos < len(p.src) && p.src[p.pos] == ']' {
-		p.pos += 1
-		p.col += 1
-		return true
-	}
-
 	for {
-		if !parse_element(p, sequencer, parent) do return false
-
 		skip_ws(p)
 		if p.pos >= len(p.src) {
 			parse_error(p, "unterminated list")
 			return false
 		}
-		c := p.src[p.pos]
-		if c == ']' {
+		if p.src[p.pos] == ']' {
 			p.pos += 1
 			p.col += 1
 			return true
 		}
-		if c != ',' {
-			parse_error(p, "expected ',' or ']'")
-			return false
-		}
-		p.pos += 1
-		p.col += 1
+		if !parse_element(p, sequencer, parent) do return false
 	}
 }
 
 
+// An element is either a note call or a timeline reference call:
+//   note( TIME PITCH [vel=V] [dur=D] )
+//   NAME( TIME )
+// Commas between tokens are optional (treated as whitespace).
 @(private)
 parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
-	if !expect(p, '(') do return false
-
-	beat, ok1 := parse_number(p)
-	if !ok1 {parse_error(p, "expected beat"); return false}
-	if !expect(p, ',') do return false
-
-	skip_ws(p)
-	if p.pos >= len(p.src) {parse_error(p, "expected payload"); return false}
-
-	c := p.src[p.pos]
-	if is_alpha(c) || c == '_' {
-		// (beat, Name) - timeline reference, shares the target's child chain.
-		name, _ := parse_ident(p)
-		target, exists := p.symbols[name]
-		if !exists {
-			parse_error(p, "undefined reference: %s", name)
-			return false
-		}
-
-		target_first := event_get(sequencer, target).kind.(Timeline).first
-		add_event(
-			sequencer,
-			parent,
-			Event{beat = beat, kind = Timeline{first = target_first}},
-		)
-	} else {
-		// (beat, duration, (key, vel)) - note.
-		duration, ok2 := parse_number(p)
-		if !ok2 {parse_error(p, "expected duration"); return false}
-		if !expect(p, ',') do return false
-		if !expect(p, '(') do return false
-		key, ok3 := parse_number(p)
-		if !ok3 {parse_error(p, "expected key"); return false}
-		if !expect(p, ',') do return false
-		vel, ok4 := parse_number(p)
-		if !ok4 {parse_error(p, "expected velocity"); return false}
-		if !expect(p, ')') do return false
-
-		add_event(
-			sequencer,
-			parent,
-			Event {
-				beat = beat,
-				kind = Note{number = i32(key), velocity = i32(vel), duration = duration},
-			},
-		)
+	name, ok := parse_ident(p)
+	if !ok {
+		parse_error(p, "expected 'note' or a timeline name")
+		return false
 	}
 
+	if name == "note" do return parse_note_call(p, sequencer, parent)
+
+	target, exists := p.symbols[name]
+	if !exists {
+		parse_error(p, "undefined reference: %s", name)
+		return false
+	}
+
+	if !expect(p, '(') do return false
+	beat, ok_b := parse_number(p)
+	if !ok_b {parse_error(p, "expected time"); return false}
 	if !expect(p, ')') do return false
+
+	target_first := event_get(sequencer, target).kind.(Timeline).first
+	add_event(
+		sequencer,
+		parent,
+		Event{beat = beat, kind = Timeline{first = target_first}},
+	)
+	return true
+}
+
+
+NOTE_DEFAULT_VELOCITY :: 100
+NOTE_DEFAULT_DURATION :: 1.0
+
+// note( TIME PITCH [vel=V] [dur=D] )
+@(private)
+parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
+	if !expect(p, '(') do return false
+
+	beat, ok_b := parse_number(p)
+	if !ok_b {parse_error(p, "expected time"); return false}
+
+	pitch, ok_p := parse_key(p)
+	if !ok_p {parse_error(p, "expected pitch"); return false}
+
+	vel: i32 = NOTE_DEFAULT_VELOCITY
+	dur: f32 = NOTE_DEFAULT_DURATION
+
+	for {
+		skip_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unterminated note call")
+			return false
+		}
+		if p.src[p.pos] == ')' do break
+
+		arg_name, ok_a := parse_ident(p)
+		if !ok_a {parse_error(p, "expected argument name or ')'"); return false}
+		if !expect(p, '=') do return false
+
+		switch arg_name {
+		case "vel":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected velocity"); return false}
+			vel = i32(v)
+		case "dur":
+			d, ok := parse_number(p)
+			if !ok {parse_error(p, "expected duration"); return false}
+			dur = d
+		case:
+			parse_error(p, "unknown note argument: %s", arg_name)
+			return false
+		}
+	}
+	if !expect(p, ')') do return false
+
+	add_event(
+		sequencer,
+		parent,
+		Event {
+			beat = beat,
+			kind = Note{number = pitch, velocity = vel, duration = dur},
+		},
+	)
 	return true
 }
 
@@ -193,7 +215,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 skip_ws :: proc(p: ^Parser) {
 	for p.pos < len(p.src) {
 		switch p.src[p.pos] {
-		case ' ', '\t', '\r':
+		case ' ', '\t', '\r', ',':
 			p.pos += 1
 			p.col += 1
 		case '\n':
@@ -235,6 +257,87 @@ parse_ident :: proc(p: ^Parser) -> (string, bool) {
 		}
 	}
 	return p.src[start:p.pos], true
+}
+
+// A MIDI key can be written either as a raw number (e.g. 60) or as a
+// note name with an optional accidental and an octave (e.g. C4, F#3, Ab-1).
+// Sharp is '#'; flat is lowercase 'b' (uppercase B is a note letter).
+// The letter itself is case-insensitive. MIDI 60 = C4.
+@(private)
+parse_key :: proc(p: ^Parser) -> (i32, bool) {
+	skip_ws(p)
+	if p.pos >= len(p.src) do return 0, false
+
+	c := p.src[p.pos]
+	upper := c
+	if upper >= 'a' && upper <= 'z' do upper -= 'a' - 'A'
+	if upper >= 'A' && upper <= 'G' do return parse_note_name(p)
+
+	n, ok := parse_number(p)
+	if !ok do return 0, false
+	return i32(n), true
+}
+
+@(private)
+parse_note_name :: proc(p: ^Parser) -> (i32, bool) {
+	c := p.src[p.pos]
+	if c >= 'a' && c <= 'z' do c -= 'a' - 'A'
+
+	base: i32
+	switch c {
+	case 'C':
+		base = 0
+	case 'D':
+		base = 2
+	case 'E':
+		base = 4
+	case 'F':
+		base = 5
+	case 'G':
+		base = 7
+	case 'A':
+		base = 9
+	case 'B':
+		base = 11
+	case:
+		return 0, false
+	}
+	p.pos += 1
+	p.col += 1
+
+	if p.pos < len(p.src) {
+		acc := p.src[p.pos]
+		if acc == '#' {
+			base += 1
+			p.pos += 1
+			p.col += 1
+		} else if acc == 'b' {
+			base -= 1
+			p.pos += 1
+			p.col += 1
+		}
+	}
+
+	octave_sign: i32 = 1
+	if p.pos < len(p.src) && p.src[p.pos] == '-' {
+		octave_sign = -1
+		p.pos += 1
+		p.col += 1
+	}
+	if p.pos >= len(p.src) || !is_digit(p.src[p.pos]) {
+		parse_error(p, "expected octave after note name")
+		return 0, false
+	}
+
+	octave: i32 = 0
+	for p.pos < len(p.src) && is_digit(p.src[p.pos]) {
+		octave = octave * 10 + i32(p.src[p.pos] - '0')
+		p.pos += 1
+		p.col += 1
+	}
+	octave *= octave_sign
+
+	return (octave + 1) * 12 + base, true
 }
 
 @(private)
