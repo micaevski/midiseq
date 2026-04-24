@@ -5,15 +5,15 @@ import "core:time"
 
 SOURCE :: `
 A = [
-    (0, 0.4, (60, 100)),
+    (0,   0.4, (60, 100)),
     (0.5, 0.4, (62, 100)),
-    (1, 0.4, (64, 100)),
+    (1,   0.4, (64, 100)),
     (1.5, 0.4, (67, 100))
 ]
 
 B = [
-    (0, 2, A),
-    (2, 2, A)
+    (0, A),
+    (2, A)
 ]
 `
 
@@ -34,14 +34,13 @@ main :: proc() {
 
 	start_sequencer(&sequencer)
 
-	total_duration := pool_get(&sequencer.pool, sequencer.root).duration
-
 	last := time.now()
-	for sequencer.beat < total_duration {
+	for {
 		now := time.now()
 		dt := f32(time.duration_seconds(time.diff(last, now)))
 		last = now
 		sequencer_tick(&sequencer, dt)
+		if sequencer_finished(&sequencer) do break
 		time.sleep(1 * time.Millisecond)
 	}
 

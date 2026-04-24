@@ -14,6 +14,7 @@ NIL_EVENT :: Event_Index(0)
 Note :: struct {
 	number:   i32, // MIDI note, 0..127
 	velocity: i32, // 0..127
+	duration: f32, // in beats; note-off fires at start_beat + duration
 }
 
 // A Timeline is a doubly-linked list of child Events sorted by beat,
@@ -44,16 +45,10 @@ Event_Kind :: union {
 //   active_next - active chain in the parent Timeline (unsorted, head-inserted).
 Event :: struct {
 	beat:        f32,
-	duration:    f32,
 	kind:        Event_Kind,
 	prev:        Event_Index,
 	next:        Event_Index,
 	active_next: Event_Index,
-}
-
-Event_Pool :: struct {
-	storage: []Event,
-	count:   u32,
 }
 
 // The Sequencer owns the pool and the root Event. MIDI output is
@@ -63,7 +58,7 @@ Sequencer :: struct {
 	tempo: f32, // beats per minute
 	beat:  f32, // current playhead, in beats
 	root:  Event_Index,
-	pool:  Event_Pool,
+	pool:  Pool(Event),
 	midi:  ^Midi_Out,
 }
 
@@ -71,26 +66,25 @@ Sequencer :: struct {
 make_sequencer :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Sequencer {
 	capacity := pool_bytes / size_of(Event)
 	sequencer := Sequencer{}
-	sequencer.pool.storage = make([]Event, capacity)
-	sequencer.pool.count = 1 // index 0 reserved as NIL_EVENT
+	pool_init(&sequencer.pool, capacity)
 	return sequencer
 }
 
 destroy_sequencer :: proc(sequencer: ^Sequencer) {
-	delete(sequencer.pool.storage)
+	pool_destroy(&sequencer.pool)
 }
 
-// Reserve a zero-initialized slot in the pool. Returns NIL_EVENT if full.
-pool_alloc :: proc(pool: ^Event_Pool) -> Event_Index {
-	if int(pool.count) >= len(pool.storage) do return NIL_EVENT
-	index := Event_Index(pool.count)
-	pool.count += 1
-	pool.storage[u32(index)] = {}
-	return index
+// Event-typed wrappers around the generic Pool so call sites don't cast.
+event_alloc :: proc(sequencer: ^Sequencer) -> Event_Index {
+	return Event_Index(pool_alloc(&sequencer.pool))
 }
 
-pool_get :: proc(pool: ^Event_Pool, index: Event_Index) -> ^Event {
-	return &pool.storage[u32(index)]
+event_free :: proc(sequencer: ^Sequencer, index: Event_Index) {
+	pool_free(&sequencer.pool, u32(index))
+}
+
+event_get :: proc(sequencer: ^Sequencer, index: Event_Index) -> ^Event {
+	return pool_get(&sequencer.pool, u32(index))
 }
 
 // Insert `event` into the child list of the Timeline stored at `parent`,
@@ -98,19 +92,19 @@ pool_get :: proc(pool: ^Event_Pool, index: Event_Index) -> ^Event {
 // same beat (stable insertion). Returns the new event's index, or
 // NIL_EVENT if the pool is full. Panics if `parent` is not a Timeline.
 add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> Event_Index {
-	new_idx := pool_alloc(&sequencer.pool)
+	new_idx := event_alloc(sequencer)
 	if new_idx == NIL_EVENT do return NIL_EVENT
 
-	new_event := pool_get(&sequencer.pool, new_idx)
+	new_event := event_get(sequencer, new_idx)
 	new_event^ = event
 
-	parent_event := pool_get(&sequencer.pool, parent)
+	parent_event := event_get(sequencer, parent)
 	timeline := &parent_event.kind.(Timeline)
 
 	current_idx := timeline.first
 	prev_idx := NIL_EVENT
 	for current_idx != NIL_EVENT {
-		current_event := pool_get(&sequencer.pool, current_idx)
+		current_event := event_get(sequencer, current_idx)
 		if current_event.beat > event.beat do break
 		prev_idx = current_idx
 		current_idx = current_event.next
@@ -121,10 +115,10 @@ add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> E
 	if prev_idx == NIL_EVENT {
 		timeline.first = new_idx
 	} else {
-		pool_get(&sequencer.pool, prev_idx).next = new_idx
+		event_get(sequencer, prev_idx).next = new_idx
 	}
 	if current_idx != NIL_EVENT {
-		pool_get(&sequencer.pool, current_idx).prev = new_idx
+		event_get(sequencer, current_idx).prev = new_idx
 	}
 
 	return new_idx
@@ -136,7 +130,7 @@ add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> E
 // Prepare the root Timeline for a fresh playback pass.
 start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.beat = 0
-	root_event := pool_get(&sequencer.pool, sequencer.root)
+	root_event := event_get(sequencer, sequencer.root)
 	timeline := &root_event.kind.(Timeline)
 	timeline.cursor = timeline.first
 	timeline.active_head = NIL_EVENT
@@ -148,47 +142,31 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	play_timeline(sequencer, sequencer.root, sequencer.beat)
 }
 
+// The root has nothing pending and nothing sounding.
+sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
+	root := event_get(sequencer, sequencer.root)
+	timeline := root.kind.(Timeline)
+	return timeline.cursor == NIL_EVENT && timeline.active_head == NIL_EVENT
+}
+
 
 // ===== Play =====
-
-// Flush everything currently sounding under `timeline` (recursing into
-// nested Timelines).
-end_all_active :: proc(sequencer: ^Sequencer, timeline: ^Timeline) {
-	current := timeline.active_head
-	for current != NIL_EVENT {
-		current_event := pool_get(&sequencer.pool, current)
-		next := current_event.active_next
-		switch k in current_event.kind {
-		case Note:
-			midi_note_off(sequencer.midi, timeline.channel, k.number)
-		case Timeline:
-			child := &current_event.kind.(Timeline)
-			end_all_active(sequencer, child)
-		}
-		current = next
-	}
-	timeline.active_head = NIL_EVENT
-}
 
 // Advance the Timeline rooted at `timeline_event_idx` to `local_time`
 // (in beats, relative to that Timeline's own start). Two passes:
 //   1. Start any pending events whose beat has been reached.
-//   2. Tick active nested Timelines recursively; end any events whose
-//      beat + duration has been reached.
-// If `local_time` runs past the wrapping Event's duration, everything
-// still sounding is flushed before returning.
+//   2. Tick active nested Timelines recursively; unlink anything that
+//      has finished.
+// A Note is finished at start_beat + duration. A Timeline is finished
+// when it has no pending events and nothing currently sounding.
 play_timeline :: proc(sequencer: ^Sequencer, timeline_event_idx: Event_Index, local_time: f32) {
-	timeline_event := pool_get(&sequencer.pool, timeline_event_idx)
+	timeline_event := event_get(sequencer, timeline_event_idx)
 	timeline := &timeline_event.kind.(Timeline)
-	duration := timeline_event.duration
-
-	effective := local_time
-	if effective > duration do effective = duration
 
 	// Pass 1: start pending events.
 	for timeline.cursor != NIL_EVENT {
-		cursor_event := pool_get(&sequencer.pool, timeline.cursor)
-		if cursor_event.beat > effective do break
+		cursor_event := event_get(sequencer, timeline.cursor)
+		if cursor_event.beat > local_time do break
 
 		switch k in cursor_event.kind {
 		case Note:
@@ -208,34 +186,32 @@ play_timeline :: proc(sequencer: ^Sequencer, timeline_event_idx: Event_Index, lo
 	prev_idx := NIL_EVENT
 	current := timeline.active_head
 	for current != NIL_EVENT {
-		current_event := pool_get(&sequencer.pool, current)
+		current_event := event_get(sequencer, current)
 		next := current_event.active_next
-		finished := current_event.beat + current_event.duration <= effective
 
+		finished: bool
 		switch k in current_event.kind {
 		case Note:
-			if finished do midi_note_off(sequencer.midi, timeline.channel, k.number)
+			if current_event.beat + k.duration <= local_time {
+				midi_note_off(sequencer.midi, timeline.channel, k.number)
+				finished = true
+			}
 		case Timeline:
-			// Always recurse: the child processes its own pending/ending
-			// and, if its slot has expired, flushes itself.
-			play_timeline(sequencer, current, effective - current_event.beat)
+			play_timeline(sequencer, current, local_time - current_event.beat)
+			child := &current_event.kind.(Timeline)
+			finished = child.cursor == NIL_EVENT && child.active_head == NIL_EVENT
 		}
 
 		if finished {
 			if prev_idx == NIL_EVENT {
 				timeline.active_head = next
 			} else {
-				pool_get(&sequencer.pool, prev_idx).active_next = next
+				event_get(sequencer, prev_idx).active_next = next
 			}
 		} else {
 			prev_idx = current
 		}
 
 		current = next
-	}
-
-	// If we've run past this Timeline's slot, flush anything still held.
-	if local_time >= duration {
-		end_all_active(sequencer, timeline)
 	}
 }

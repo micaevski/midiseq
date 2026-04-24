@@ -61,12 +61,12 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 		}
 		if !expect(p, '=') do return false
 
-		idx := pool_alloc(&sequencer.pool)
+		idx := event_alloc(sequencer)
 		if idx == NIL_EVENT {
 			parse_error(p, "event pool full")
 			return false
 		}
-		pool_get(&sequencer.pool, idx).kind = Timeline{}
+		event_get(sequencer, idx).kind = Timeline{}
 
 		p.symbols[name] = idx
 
@@ -88,9 +88,6 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Event_Index {
 
 		idx := p.symbols[name]
 		if !parse_list_into(p, sequencer, idx) do return NIL_EVENT
-
-		event := pool_get(&sequencer.pool, idx)
-		event.duration = compute_duration(sequencer, event.kind.(Timeline))
 
 		last = idx
 	}
@@ -138,17 +135,32 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 	beat, ok1 := parse_number(p)
 	if !ok1 {parse_error(p, "expected beat"); return false}
 	if !expect(p, ',') do return false
-	duration, ok2 := parse_number(p)
-	if !ok2 {parse_error(p, "expected duration"); return false}
-	if !expect(p, ',') do return false
 
 	skip_ws(p)
 	if p.pos >= len(p.src) {parse_error(p, "expected payload"); return false}
 
-	if p.src[p.pos] == '(' {
-		// (key, vel)
-		p.pos += 1
-		p.col += 1
+	c := p.src[p.pos]
+	if is_alpha(c) || c == '_' {
+		// (beat, Name) - timeline reference, shares the target's child chain.
+		name, _ := parse_ident(p)
+		target, exists := p.symbols[name]
+		if !exists {
+			parse_error(p, "undefined reference: %s", name)
+			return false
+		}
+
+		target_first := event_get(sequencer, target).kind.(Timeline).first
+		add_event(
+			sequencer,
+			parent,
+			Event{beat = beat, kind = Timeline{first = target_first}},
+		)
+	} else {
+		// (beat, duration, (key, vel)) - note.
+		duration, ok2 := parse_number(p)
+		if !ok2 {parse_error(p, "expected duration"); return false}
+		if !expect(p, ',') do return false
+		if !expect(p, '(') do return false
 		key, ok3 := parse_number(p)
 		if !ok3 {parse_error(p, "expected key"); return false}
 		if !expect(p, ',') do return false
@@ -161,46 +173,13 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 			parent,
 			Event {
 				beat = beat,
-				duration = duration,
-				kind = Note{number = i32(key), velocity = i32(vel)},
+				kind = Note{number = i32(key), velocity = i32(vel), duration = duration},
 			},
-		)
-	} else {
-		// Reference to another timeline: share its child chain rather than
-		// copying. The new event has its own beat/duration and its own
-		// runtime state (cursor/active_head), but its `first` points into
-		// the target's authoring data.
-		name, ok3 := parse_ident(p)
-		if !ok3 {parse_error(p, "expected reference name"); return false}
-		target, exists := p.symbols[name]
-		if !exists {
-			parse_error(p, "undefined reference: %s", name)
-			return false
-		}
-
-		target_first := pool_get(&sequencer.pool, target).kind.(Timeline).first
-		add_event(
-			sequencer,
-			parent,
-			Event{beat = beat, duration = duration, kind = Timeline{first = target_first}},
 		)
 	}
 
 	if !expect(p, ')') do return false
 	return true
-}
-
-
-compute_duration :: proc(sequencer: ^Sequencer, timeline: Timeline) -> f32 {
-	max_end: f32 = 0
-	child := timeline.first
-	for child != NIL_EVENT {
-		e := pool_get(&sequencer.pool, child)
-		end := e.beat + e.duration
-		if end > max_end do max_end = end
-		child = e.next
-	}
-	return max_end
 }
 
 
