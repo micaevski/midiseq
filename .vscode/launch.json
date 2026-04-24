@@ -1,0 +1,14 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Debug midiseq",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/midiseq",
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "odin build (debug)"
+		}
+	]
+}

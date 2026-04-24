@@ -1,0 +1,10 @@
+# Build output
+midiseq
+midiseq.dSYM/
+*.o
+*.obj
+*.exe
+*.pdb
+
+# macOS
+.DS_Store

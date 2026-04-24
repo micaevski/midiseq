@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "odin build (debug)",
+			"type": "shell",
+			"command": "odin",
+			"args": ["build", ".", "-debug", "-out:midiseq"],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": []
+		}
+	]
+}
