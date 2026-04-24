@@ -1,5 +1,6 @@
 package main
 
+import "core:fmt"
 import "seq"
 import rl "vendor:raylib"
 
@@ -74,17 +75,50 @@ main :: proc() {
 
 	if !load_song(&sequencer, SOURCE) do return
 
-	rl.InitWindow(480, 120, "midiseq")
+	rl.InitWindow(520, 220, "midiseq")
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(120)
 
-	for !rl.WindowShouldClose() && !seq.sequencer_finished(&sequencer) {
-		seq.sequencer_tick(&sequencer, rl.GetFrameTime())
+	playing := true
+
+	for !rl.WindowShouldClose() {
+		if playing && !seq.sequencer_finished(&sequencer) {
+			seq.sequencer_tick(&sequencer, rl.GetFrameTime())
+		}
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
-		rl.DrawText("Playing. Esc to stop.", 20, 40, 20, rl.RAYWHITE)
+
+		if rl.GuiButton(rl.Rectangle{20, 20, 100, 40}, "Start") {
+			if seq.sequencer_finished(&sequencer) {
+				seq.start_sequencer(&sequencer)
+			}
+			playing = true
+		}
+		if rl.GuiButton(rl.Rectangle{140, 20, 100, 40}, "Pause") {
+			if playing {
+				midi_all_notes_off(&midi)
+			}
+			playing = false
+		}
+		if rl.GuiButton(rl.Rectangle{260, 20, 100, 40}, "Stop") {
+			midi_all_notes_off(&midi)
+			seq.start_sequencer(&sequencer)
+			playing = false
+		}
+
+		tempo_label := fmt.ctprintf("%.0f BPM", sequencer.tempo)
+		rl.GuiSlider(
+			rl.Rectangle{120, 100, 280, 20},
+			"Tempo",
+			tempo_label,
+			&sequencer.tempo,
+			40,
+			240,
+		)
+
 		rl.EndDrawing()
+		free_all(context.temp_allocator)
 	}
 
 	midi_all_notes_off(&midi)

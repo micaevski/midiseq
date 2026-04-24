@@ -10,7 +10,7 @@ Parser :: struct {
 	pos:     int,
 	line:    int,
 	col:     int,
-	symbols: map[string]Event_Index,
+	symbols: map[string]Template_Index,
 }
 
 
@@ -18,7 +18,7 @@ Parser :: struct {
 // definitions. References inside a list must resolve to a timeline
 // that has already been defined earlier in the source. The last
 // definition becomes the root.
-parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Event_Index, ok: bool) {
+parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Template_Index, ok: bool) {
 	backing := make([]byte, 256 * 1024)
 	defer delete(backing)
 
@@ -30,13 +30,13 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Event_Index, 
 		src     = src,
 		line    = 1,
 		col     = 1,
-		symbols = make(map[string]Event_Index, 16, parse_alloc),
+		symbols = make(map[string]Template_Index, 16, parse_alloc),
 	}
 
 	// Pass 1: discover every top-level `IDENT = [...]` and reserve a
 	// Timeline event for it in the pool. Bodies are skipped by
 	// balancing brackets.
-	if !pass_1(sequencer, &parser) do return NIL_EVENT, false
+	if !pass_1(sequencer, &parser) do return NIL_TEMPLATE, false
 
 	// Pass 2: parse each body and populate its Timeline. References
 	// stash the target's index in their `first` field (unresolved).
@@ -44,7 +44,7 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Event_Index, 
 	parser.line = 1
 	parser.col = 1
 	root = pass_2(sequencer, &parser)
-	if root == NIL_EVENT do return NIL_EVENT, false
+	if root == NIL_TEMPLATE do return NIL_TEMPLATE, false
 
 	// Pass 3: every top-level body is populated now, so we can rewrite
 	// each reference's stashed target-index into the target's actual
@@ -66,7 +66,7 @@ resolve_references :: proc(sequencer: ^Sequencer, p: ^Parser) {
 		if !ok do continue
 
 		child_index := top_timeline.first
-		for child_index != NIL_EVENT {
+		for child_index != NIL_TEMPLATE {
 			child := event_get(sequencer, child_index)
 			next := child.next
 			if _, is_timeline := child.kind.(Timeline); is_timeline {
@@ -94,7 +94,7 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 		if !expect(p, '=') do return false
 
 		idx := event_alloc(sequencer)
-		if idx == NIL_EVENT {
+		if idx == NIL_TEMPLATE {
 			parse_error(p, "event pool full")
 			return false
 		}
@@ -109,18 +109,18 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 
 
 @(private)
-pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Event_Index {
-	last := NIL_EVENT
+pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Template_Index {
+	last := NIL_TEMPLATE
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
 
 		name, ok := parse_ident(p)
-		if !ok do return NIL_EVENT
-		if !expect(p, '=') do return NIL_EVENT
+		if !ok do return NIL_TEMPLATE
+		if !expect(p, '=') do return NIL_TEMPLATE
 
 		idx := p.symbols[name]
-		if !parse_list_into(p, sequencer, idx) do return NIL_EVENT
+		if !parse_list_into(p, sequencer, idx) do return NIL_TEMPLATE
 
 		last = idx
 	}
@@ -129,7 +129,7 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Event_Index {
 
 
 @(private)
-parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
+parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
 	if !expect(p, '[') do return false
 
 	for {
@@ -153,7 +153,7 @@ parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) 
 //   NAME( TIME )
 // Commas between tokens are optional (treated as whitespace).
 @(private)
-parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
+parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
 	name, ok := parse_ident(p)
 	if !ok {
 		parse_error(p, "expected 'note' or a timeline name")
@@ -222,7 +222,7 @@ NOTE_DEFAULT_DURATION :: 1.0
 
 // note( TIME PITCH [vel=V] [dur=D] )
 @(private)
-parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
+parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
 	if !expect(p, '(') do return false
 
 	beat, ok_b := parse_number(p)

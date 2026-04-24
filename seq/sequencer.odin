@@ -4,11 +4,12 @@ package seq
 DEFAULT_POOL_BYTES :: 32 * 1024 * 1024
 
 
-// Index into the Event pool. 0 is reserved as the nil sentinel, so every
-// default-zeroed field that holds an Event_Index (Timeline.first, Event.prev,
-// Event.next, Event.active_next, Sequencer.root) is a valid "points to nothing".
-Event_Index :: distinct u32
-NIL_EVENT :: Event_Index(0)
+// Distinct index types for the two pools. Index 0 is the nil sentinel for
+// both, so default-zeroed fields safely mean "points to nothing".
+Template_Index :: distinct u32
+Runtime_Index :: distinct u32
+NIL_TEMPLATE :: Template_Index(0)
+NIL_RUNTIME :: Runtime_Index(0)
 
 
 Note :: struct {
@@ -17,21 +18,15 @@ Note :: struct {
 	duration: f32, // in beats; note-off fires at start_beat + duration
 }
 
-// A Timeline is a doubly-linked list of child Events sorted by beat,
-// plus a small amount of runtime state.
-//
-// Authoring:
-//   first - head of the sibling chain
-//   channel - MIDI channel (0..15) for Notes in this Timeline
-//
-// Runtime (set on an instance, not on authoring templates):
-//   cursor - next sibling Event that has yet to be started
-//   active_head - head of the active chain (currently-sounding children),
-//     linked via Event.active_next
+// A Timeline has authored fields (first, channel, transposition, rate)
+// and playback fields (cursor, active_head).
+//   first       - head of the authored sibling chain (template pool).
+//   cursor      - authored event to fire next (template pool).
+//   active_head - head of the currently-sounding instances (runtime pool).
 Timeline :: struct {
-	first:         Event_Index,
-	cursor:        Event_Index,
-	active_head:   Event_Index,
+	first:         Template_Index,
+	cursor:        Template_Index,
+	active_head:   Runtime_Index,
 	channel:       i32,
 	transposition: i32, // semitones; accumulates additively from parent to child
 	rate:          f32, // time-scale multiplier; accumulates multiplicatively
@@ -42,15 +37,16 @@ Event_Kind :: union {
 	Timeline,
 }
 
-// An Event lives in the Sequencer's pool.
-//   prev/next  - sibling chain in the parent Timeline, sorted by beat.
-//   active_next - active chain in the parent Timeline (unsorted, head-inserted).
+// An Event struct is shared by both pools, but `prev`/`next` are only
+// meaningful for template events (sibling chain) and `active_next` is
+// only meaningful for runtime events (active chain). The other fields
+// stay at their nil sentinels when unused.
 Event :: struct {
 	beat:        f32,
 	kind:        Event_Kind,
-	prev:        Event_Index,
-	next:        Event_Index,
-	active_next: Event_Index,
+	prev:        Template_Index,
+	next:        Template_Index,
+	active_next: Runtime_Index,
 }
 
 
@@ -65,14 +61,19 @@ Sink :: struct {
 }
 
 
-// The Sequencer owns the pool and the root Event. Output flows through
-// the installed Sink.
+// The Sequencer holds two pools:
+//   pool    - authored template events, written by the parser.
+//   runtime - transient instances created during playback.
+// `root` is the authored root (template). `root_instance` is a fresh
+// runtime clone of it, re-created every time start_sequencer is called.
 Sequencer :: struct {
-	tempo: f32, // beats per minute
-	beat:  f32, // current playhead, in beats
-	root:  Event_Index,
-	pool:  Pool(Event),
-	sink:  Sink,
+	tempo:         f32,
+	beat:          f32,
+	root:          Template_Index,
+	root_instance: Runtime_Index,
+	pool:          Pool(Event),
+	runtime:       Pool(Event),
+	sink:          Sink,
 }
 
 
@@ -80,33 +81,54 @@ make_sequencer :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Sequencer {
 	capacity := pool_bytes / size_of(Event)
 	sequencer := Sequencer{}
 	pool_init(&sequencer.pool, capacity)
+	pool_init(&sequencer.runtime, capacity)
 	return sequencer
 }
 
 destroy_sequencer :: proc(sequencer: ^Sequencer) {
 	pool_destroy(&sequencer.pool)
+	pool_destroy(&sequencer.runtime)
 }
 
-// Event-typed wrappers around the generic Pool so call sites don't cast.
-event_alloc :: proc(sequencer: ^Sequencer) -> Event_Index {
-	return Event_Index(pool_alloc(&sequencer.pool))
+
+// Template-pool wrappers (parser side).
+event_alloc :: proc(sequencer: ^Sequencer) -> Template_Index {
+	return Template_Index(pool_alloc(&sequencer.pool))
 }
 
-event_free :: proc(sequencer: ^Sequencer, index: Event_Index) {
+event_free :: proc(sequencer: ^Sequencer, index: Template_Index) {
 	pool_free(&sequencer.pool, u32(index))
 }
 
-event_get :: proc(sequencer: ^Sequencer, index: Event_Index) -> ^Event {
+event_get :: proc(sequencer: ^Sequencer, index: Template_Index) -> ^Event {
 	return pool_get(&sequencer.pool, u32(index))
 }
+
+// Runtime-pool wrappers (playback side).
+runtime_alloc :: proc(sequencer: ^Sequencer) -> Runtime_Index {
+	return Runtime_Index(pool_alloc(&sequencer.runtime))
+}
+
+runtime_free :: proc(sequencer: ^Sequencer, index: Runtime_Index) {
+	pool_free(&sequencer.runtime, u32(index))
+}
+
+runtime_get :: proc(sequencer: ^Sequencer, index: Runtime_Index) -> ^Event {
+	return pool_get(&sequencer.runtime, u32(index))
+}
+
 
 // Insert `event` into the child list of the Timeline stored at `parent`,
 // keeping the list sorted by beat. Ties go after existing events at the
 // same beat (stable insertion). Returns the new event's index, or
-// NIL_EVENT if the pool is full. Panics if `parent` is not a Timeline.
-add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> Event_Index {
+// NIL_TEMPLATE if the pool is full. Panics if `parent` is not a Timeline.
+add_event :: proc(
+	sequencer: ^Sequencer,
+	parent: Template_Index,
+	event: Event,
+) -> Template_Index {
 	new_idx := event_alloc(sequencer)
-	if new_idx == NIL_EVENT do return NIL_EVENT
+	if new_idx == NIL_TEMPLATE do return NIL_TEMPLATE
 
 	new_event := event_get(sequencer, new_idx)
 	new_event^ = event
@@ -115,8 +137,8 @@ add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> E
 	timeline := &parent_event.kind.(Timeline)
 
 	current_idx := timeline.first
-	prev_idx := NIL_EVENT
-	for current_idx != NIL_EVENT {
+	prev_idx := NIL_TEMPLATE
+	for current_idx != NIL_TEMPLATE {
 		current_event := event_get(sequencer, current_idx)
 		if current_event.beat > event.beat do break
 		prev_idx = current_idx
@@ -125,12 +147,12 @@ add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> E
 
 	new_event.prev = prev_idx
 	new_event.next = current_idx
-	if prev_idx == NIL_EVENT {
+	if prev_idx == NIL_TEMPLATE {
 		timeline.first = new_idx
 	} else {
 		event_get(sequencer, prev_idx).next = new_idx
 	}
-	if current_idx != NIL_EVENT {
+	if current_idx != NIL_TEMPLATE {
 		event_get(sequencer, current_idx).prev = new_idx
 	}
 
@@ -140,41 +162,59 @@ add_event :: proc(sequencer: ^Sequencer, parent: Event_Index, event: Event) -> E
 
 // ===== Sequencer driver =====
 
-// Prepare the root Timeline for a fresh playback pass.
+// Reset the runtime pool and allocate a fresh root instance cloned from
+// the authored root template. Safe to call repeatedly (Stop -> Start).
 start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.beat = 0
-	root_event := event_get(sequencer, sequencer.root)
-	timeline := &root_event.kind.(Timeline)
-	timeline.cursor = timeline.first
-	timeline.active_head = NIL_EVENT
+
+	// Wipe the runtime pool — no need to walk-and-free individual events.
+	sequencer.runtime.count = 1
+	sequencer.runtime.free_head = 0
+
+	// Clone the authored root as a fresh runtime instance.
+	template := event_get(sequencer, sequencer.root)
+	template_tl := template.kind.(Timeline)
+
+	root_idx := runtime_alloc(sequencer)
+	root_event := runtime_get(sequencer, root_idx)
+	root_event.beat = 0
+	root_event.kind = Timeline {
+		first         = template_tl.first,
+		cursor        = template_tl.first,
+		active_head   = NIL_RUNTIME,
+		channel       = template_tl.channel,
+		transposition = template_tl.transposition,
+		rate          = template_tl.rate,
+	}
+	sequencer.root_instance = root_idx
 }
 
-// Advance the playhead by `dt` seconds, tick the root, and adopt any
-// spawned Timeline instances into the root's active chain.
+// Advance the playhead by `dt` seconds, tick the root instance, and
+// adopt any spawned Timeline instances into its active chain.
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
-	spawn_head := play_timeline(sequencer, sequencer.root, sequencer.beat)
-	if spawn_head == NIL_EVENT do return
+	spawn_head := play_timeline(sequencer, sequencer.root_instance, sequencer.beat)
+	if spawn_head == NIL_RUNTIME do return
 
-	root_event := event_get(sequencer, sequencer.root)
+	root_event := runtime_get(sequencer, sequencer.root_instance)
 	root_timeline := &root_event.kind.(Timeline)
 
 	tail := spawn_head
 	for {
-		event := event_get(sequencer, tail)
-		if event.active_next == NIL_EVENT do break
+		event := runtime_get(sequencer, tail)
+		if event.active_next == NIL_RUNTIME do break
 		tail = event.active_next
 	}
-	event_get(sequencer, tail).active_next = root_timeline.active_head
+	runtime_get(sequencer, tail).active_next = root_timeline.active_head
 	root_timeline.active_head = spawn_head
 }
 
-// The root has nothing pending and nothing sounding.
+// The root instance has nothing pending and nothing sounding.
 sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
-	root := event_get(sequencer, sequencer.root)
+	root := runtime_get(sequencer, sequencer.root_instance)
 	timeline := root.kind.(Timeline)
-	return timeline.cursor == NIL_EVENT && timeline.active_head == NIL_EVENT
+	return timeline.cursor == NIL_TEMPLATE && timeline.active_head == NIL_RUNTIME
 }
 
 
@@ -190,35 +230,34 @@ sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
 	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
 }
 
-// Advance the Timeline rooted at `timeline_event_idx` to `local_time`
-// (in beats, relative to that Timeline's own start) and return a chain of
-// newly-spawned Timeline instances for the caller to adopt.
+// Advance the runtime Timeline instance at `timeline_event_idx` to
+// `local_time` (in beats, relative to that instance's own start) and
+// return a chain of newly-spawned Timeline instances for the caller to
+// adopt.
 //
-//   Authoring events are immutable templates. Every event that fires at
-//   playback (Note or Timeline) becomes a freshly-allocated instance from
-//   the pool. Note-instances live in this timeline's own active chain;
-//   Timeline-instances are returned in the spawn chain instead (flattens
-//   nested recursion — the child finishes without holding the grandchild).
-//
-//   On completion, instances are freed back to the pool.
+//   Cursor walks the authored children chain in the template pool.
+//   Each fired event is copied into a fresh runtime instance.
+//   Note-instances join this timeline's own active chain; Timeline
+//   instances are returned via the spawn chain (flattens recursion).
+//   On completion, runtime instances are freed back to the runtime pool.
 play_timeline :: proc(
 	sequencer: ^Sequencer,
-	timeline_event_idx: Event_Index,
+	timeline_event_idx: Runtime_Index,
 	local_time: f32,
-) -> Event_Index {
-	timeline_event := event_get(sequencer, timeline_event_idx)
+) -> Runtime_Index {
+	timeline_event := runtime_get(sequencer, timeline_event_idx)
 	timeline := &timeline_event.kind.(Timeline)
 
-	spawn_head := NIL_EVENT
+	spawn_head := NIL_RUNTIME
 
-	// Pass 1: walk the authoring cursor, alloc an instance per fired event.
-	for timeline.cursor != NIL_EVENT {
+	// Pass 1: walk the template cursor, alloc a runtime instance per fired event.
+	for timeline.cursor != NIL_TEMPLATE {
 		cursor_event := event_get(sequencer, timeline.cursor)
 		if cursor_event.beat > local_time do break
 
-		new_idx := event_alloc(sequencer)
-		if new_idx == NIL_EVENT do break // pool exhausted; try again next tick
-		new_event := event_get(sequencer, new_idx)
+		new_idx := runtime_alloc(sequencer)
+		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
+		new_event := runtime_get(sequencer, new_idx)
 		new_event.beat = cursor_event.beat
 		new_event.kind = cursor_event.kind
 
@@ -235,7 +274,7 @@ play_timeline :: proc(
 		case Timeline:
 			new_timeline := &new_event.kind.(Timeline)
 			new_timeline.cursor = new_timeline.first
-			new_timeline.active_head = NIL_EVENT
+			new_timeline.active_head = NIL_RUNTIME
 			new_timeline.transposition += timeline.transposition
 			new_timeline.rate *= timeline.rate
 			new_event.active_next = spawn_head
@@ -245,11 +284,11 @@ play_timeline :: proc(
 		timeline.cursor = cursor_event.next
 	}
 
-	// Pass 2: tick active, free finished, collect sub-spawns.
-	prev_idx := NIL_EVENT
+	// Pass 2: tick active runtime instances, free finished ones, collect sub-spawns.
+	prev_idx := NIL_RUNTIME
 	current := timeline.active_head
-	for current != NIL_EVENT {
-		current_event := event_get(sequencer, current)
+	for current != NIL_RUNTIME {
+		current_event := runtime_get(sequencer, current)
 		next := current_event.active_next
 
 		finished: bool
@@ -270,28 +309,28 @@ play_timeline :: proc(
 				current,
 				(local_time - current_event.beat) * child.rate,
 			)
-			if sub_head != NIL_EVENT {
+			if sub_head != NIL_RUNTIME {
 				sub_tail := sub_head
 				walker := sub_head
-				for walker != NIL_EVENT {
-					walker_event := event_get(sequencer, walker)
+				for walker != NIL_RUNTIME {
+					walker_event := runtime_get(sequencer, walker)
 					walker_event.beat = walker_event.beat / child.rate + current_event.beat
 					sub_tail = walker
 					walker = walker_event.active_next
 				}
-				event_get(sequencer, sub_tail).active_next = spawn_head
+				runtime_get(sequencer, sub_tail).active_next = spawn_head
 				spawn_head = sub_head
 			}
-			finished = child.cursor == NIL_EVENT && child.active_head == NIL_EVENT
+			finished = child.cursor == NIL_TEMPLATE && child.active_head == NIL_RUNTIME
 		}
 
 		if finished {
-			if prev_idx == NIL_EVENT {
+			if prev_idx == NIL_RUNTIME {
 				timeline.active_head = next
 			} else {
-				event_get(sequencer, prev_idx).active_next = next
+				runtime_get(sequencer, prev_idx).active_next = next
 			}
-			event_free(sequencer, current)
+			runtime_free(sequencer, current)
 		} else {
 			prev_idx = current
 		}
