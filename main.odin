@@ -44,7 +44,7 @@ PART = [
 
 SONG = [
     PART(0)
-    PART(4 trans=5 rate=2)
+    PART(4 trans=5 rate=2 chance=50)
     SONG(6)
 ]
 

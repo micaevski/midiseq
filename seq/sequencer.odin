@@ -1,7 +1,7 @@
 package seq
 
 
-DEFAULT_POOL_BYTES :: 32 * 1024 * 1024
+DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Event)
 
 
 // Distinct index types for the two pools. Index 0 is the nil sentinel for
@@ -43,6 +43,7 @@ Event_Kind :: union {
 // stay at their nil sentinels when unused.
 Event :: struct {
 	beat:        f32,
+	chance:      i32, // 0..100; probability of firing. 100 = always.
 	kind:        Event_Kind,
 	prev:        Template_Index,
 	next:        Template_Index,
@@ -64,16 +65,17 @@ Sink :: struct {
 // The Sequencer holds two pools:
 //   pool    - authored template events, written by the parser.
 //   runtime - transient instances created during playback.
-// `root` is the authored root (template). `root_instance` is a fresh
+// `root` is the authored root (template). `runtime_root` is a fresh
 // runtime clone of it, re-created every time start_sequencer is called.
 Sequencer :: struct {
-	tempo:         f32,
-	beat:          f32,
-	root:          Template_Index,
-	root_instance: Runtime_Index,
-	pool:          Pool(Event),
-	runtime:       Pool(Event),
-	sink:          Sink,
+	tempo:        f32,
+	beat:         f32,
+	root:         Template_Index,
+	runtime_root: Runtime_Index,
+	pool:         Pool(Event),
+	runtime:      Pool(Event),
+	sink:         Sink,
+	rng_state:    u32, // xorshift32; set via `SEED = N` in source
 }
 
 
@@ -122,11 +124,7 @@ runtime_get :: proc(sequencer: ^Sequencer, index: Runtime_Index) -> ^Event {
 // keeping the list sorted by beat. Ties go after existing events at the
 // same beat (stable insertion). Returns the new event's index, or
 // NIL_TEMPLATE if the pool is full. Panics if `parent` is not a Timeline.
-add_event :: proc(
-	sequencer: ^Sequencer,
-	parent: Template_Index,
-	event: Event,
-) -> Template_Index {
+add_event :: proc(sequencer: ^Sequencer, parent: Template_Index, event: Event) -> Template_Index {
 	new_idx := event_alloc(sequencer)
 	if new_idx == NIL_TEMPLATE do return NIL_TEMPLATE
 
@@ -186,7 +184,7 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 		transposition = template_tl.transposition,
 		rate          = template_tl.rate,
 	}
-	sequencer.root_instance = root_idx
+	sequencer.runtime_root = root_idx
 }
 
 // Advance the playhead by `dt` seconds, tick the root instance, and
@@ -194,10 +192,10 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
-	spawn_head := play_timeline(sequencer, sequencer.root_instance, sequencer.beat)
+	spawn_head := play_timeline(sequencer, sequencer.runtime_root, sequencer.beat)
 	if spawn_head == NIL_RUNTIME do return
 
-	root_event := runtime_get(sequencer, sequencer.root_instance)
+	root_event := runtime_get(sequencer, sequencer.runtime_root)
 	root_timeline := &root_event.kind.(Timeline)
 
 	tail := spawn_head
@@ -212,7 +210,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 
 // The root instance has nothing pending and nothing sounding.
 sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
-	root := runtime_get(sequencer, sequencer.root_instance)
+	root := runtime_get(sequencer, sequencer.runtime_root)
 	timeline := root.kind.(Timeline)
 	return timeline.cursor == NIL_TEMPLATE && timeline.active_head == NIL_RUNTIME
 }
@@ -228,6 +226,19 @@ sink_note_on :: proc(sink: ^Sink, channel, number, velocity: i32) {
 @(private)
 sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
 	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
+}
+
+// xorshift32. Remaps 0 to a fixed non-zero so an un-seeded sequencer
+// still produces a deterministic stream.
+@(private)
+rand_u32 :: proc(state: ^u32) -> u32 {
+	if state^ == 0 do state^ = 0xdeadbeef
+	x := state^
+	x ~= x << 13
+	x ~= x >> 17
+	x ~= x << 5
+	state^ = x
+	return x
 }
 
 // Advance the runtime Timeline instance at `timeline_event_idx` to
@@ -255,10 +266,21 @@ play_timeline :: proc(
 		cursor_event := event_get(sequencer, timeline.cursor)
 		if cursor_event.beat > local_time do break
 
+		// Probabilistic skip. If the chance roll fails, advance past the
+		// event without allocating anything.
+		if cursor_event.chance < 100 {
+			roll := i32(rand_u32(&sequencer.rng_state) % 100)
+			if roll >= cursor_event.chance {
+				timeline.cursor = cursor_event.next
+				continue
+			}
+		}
+
 		new_idx := runtime_alloc(sequencer)
 		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
 		new_event := runtime_get(sequencer, new_idx)
 		new_event.beat = cursor_event.beat
+		new_event.chance = cursor_event.chance
 		new_event.kind = cursor_event.kind
 
 		switch k in new_event.kind {
@@ -295,11 +317,7 @@ play_timeline :: proc(
 		switch k in current_event.kind {
 		case Note:
 			if current_event.beat + k.duration <= local_time {
-				sink_note_off(
-					&sequencer.sink,
-					timeline.channel,
-					k.number + timeline.transposition,
-				)
+				sink_note_off(&sequencer.sink, timeline.channel, k.number + timeline.transposition)
 				finished = true
 			}
 		case Timeline:

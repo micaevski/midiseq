@@ -93,12 +93,22 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 		}
 		if !expect(p, '=') do return false
 
+		// Top-level directives: `SEED = N` sets the RNG seed.
+		if name == "SEED" {
+			n, n_ok := parse_number(p)
+			if !n_ok {parse_error(p, "expected SEED value"); return false}
+			sequencer.rng_state = u32(n)
+			continue
+		}
+
 		idx := event_alloc(sequencer)
 		if idx == NIL_TEMPLATE {
 			parse_error(p, "event pool full")
 			return false
 		}
-		event_get(sequencer, idx).kind = Timeline{rate = 1}
+		top_event := event_get(sequencer, idx)
+		top_event.chance = 100
+		top_event.kind = Timeline{rate = 1}
 
 		p.symbols[name] = idx
 
@@ -118,6 +128,12 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Template_Index {
 		name, ok := parse_ident(p)
 		if !ok do return NIL_TEMPLATE
 		if !expect(p, '=') do return NIL_TEMPLATE
+
+		// SEED was consumed in pass_1; skip over its value here.
+		if name == "SEED" {
+			_, _ = parse_number(p)
+			continue
+		}
 
 		idx := p.symbols[name]
 		if !parse_list_into(p, sequencer, idx) do return NIL_TEMPLATE
@@ -174,6 +190,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index)
 
 	trans: i32 = 0
 	rate: f32 = 1
+	chance: i32 = 100
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) {
@@ -195,6 +212,10 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index)
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected rate"); return false}
 			rate = v
+		case "chance":
+			c, ok := parse_number(p)
+			if !ok {parse_error(p, "expected chance"); return false}
+			chance = i32(c)
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
@@ -210,6 +231,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index)
 		parent,
 		Event {
 			beat = beat,
+			chance = chance,
 			kind = Timeline{first = target, transposition = trans, rate = rate},
 		},
 	)
@@ -219,8 +241,9 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index)
 
 NOTE_DEFAULT_VELOCITY :: 100
 NOTE_DEFAULT_DURATION :: 1.0
+NOTE_DEFAULT_CHANCE :: 100
 
-// note( TIME PITCH [vel=V] [dur=D] )
+// note( TIME PITCH [vel=V] [dur=D] [chance=C] )
 @(private)
 parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
 	if !expect(p, '(') do return false
@@ -233,6 +256,7 @@ parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Inde
 
 	vel: i32 = NOTE_DEFAULT_VELOCITY
 	dur: f32 = NOTE_DEFAULT_DURATION
+	chance: i32 = NOTE_DEFAULT_CHANCE
 
 	for {
 		skip_ws(p)
@@ -255,6 +279,10 @@ parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Inde
 			d, ok := parse_number(p)
 			if !ok {parse_error(p, "expected duration"); return false}
 			dur = d
+		case "chance":
+			c, ok := parse_number(p)
+			if !ok {parse_error(p, "expected chance"); return false}
+			chance = i32(c)
 		case:
 			parse_error(p, "unknown note argument: %s", arg_name)
 			return false
@@ -267,6 +295,7 @@ parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Inde
 		parent,
 		Event {
 			beat = beat,
+			chance = chance,
 			kind = Note{number = pitch, velocity = vel, duration = dur},
 		},
 	)
