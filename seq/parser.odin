@@ -1,4 +1,4 @@
-package main
+package seq
 
 import "core:fmt"
 import "core:mem"
@@ -49,6 +49,7 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Event_Index, 
 }
 
 
+@(private)
 pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 	for {
 		skip_ws(p)
@@ -76,6 +77,7 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 }
 
 
+@(private)
 pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Event_Index {
 	last := NIL_EVENT
 	for {
@@ -95,6 +97,7 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Event_Index {
 }
 
 
+@(private)
 parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
 	if !expect(p, '[') do return false
 
@@ -129,6 +132,7 @@ parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) 
 }
 
 
+@(private)
 parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) -> bool {
 	if !expect(p, '(') do return false
 
@@ -185,6 +189,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 
 // ===== Lex helpers =====
 
+@(private)
 skip_ws :: proc(p: ^Parser) {
 	for p.pos < len(p.src) {
 		switch p.src[p.pos] {
@@ -201,6 +206,7 @@ skip_ws :: proc(p: ^Parser) {
 	}
 }
 
+@(private)
 expect :: proc(p: ^Parser, ch: u8) -> bool {
 	skip_ws(p)
 	if p.pos >= len(p.src) || p.src[p.pos] != ch {
@@ -212,6 +218,7 @@ expect :: proc(p: ^Parser, ch: u8) -> bool {
 	return true
 }
 
+@(private)
 parse_ident :: proc(p: ^Parser) -> (string, bool) {
 	skip_ws(p)
 	start := p.pos
@@ -230,6 +237,7 @@ parse_ident :: proc(p: ^Parser) -> (string, bool) {
 	return p.src[start:p.pos], true
 }
 
+@(private)
 parse_number :: proc(p: ^Parser) -> (f32, bool) {
 	skip_ws(p)
 	start := p.pos
@@ -261,6 +269,7 @@ parse_number :: proc(p: ^Parser) -> (f32, bool) {
 }
 
 // Advance past a balanced '[' ... ']' block.
+@(private)
 skip_list :: proc(p: ^Parser) -> bool {
 	skip_ws(p)
 	if p.pos >= len(p.src) || p.src[p.pos] != '[' {
@@ -292,14 +301,17 @@ skip_list :: proc(p: ^Parser) -> bool {
 	return false
 }
 
+@(private)
 is_alpha :: proc(c: u8) -> bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
+@(private)
 is_digit :: proc(c: u8) -> bool {
 	return c >= '0' && c <= '9'
 }
 
+@(private)
 parse_error :: proc(p: ^Parser, format: string, args: ..any) {
 	fmt.eprintf("parse error at %d:%d: ", p.line, p.col)
 	fmt.eprintfln(format, ..args)

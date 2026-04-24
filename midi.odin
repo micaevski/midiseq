@@ -4,6 +4,7 @@ import "core:c"
 import "core:fmt"
 import "core:strings"
 import pm "vendor:portmidi"
+import "seq"
 
 
 // Midi_Out owns the MIDI output stream and the (channel, key) reference
@@ -43,6 +44,17 @@ midi_close :: proc(midi: ^Midi_Out) {
 	pm.Terminate()
 }
 
+// Adaptor: wrap this Midi_Out as a seq.Sink the sequencer can emit through.
+midi_sink :: proc(midi: ^Midi_Out) -> seq.Sink {
+	on :: proc(user: rawptr, channel, number, velocity: i32) {
+		midi_note_on(cast(^Midi_Out)user, channel, number, velocity)
+	}
+	off :: proc(user: rawptr, channel, number: i32) {
+		midi_note_off(cast(^Midi_Out)user, channel, number)
+	}
+	return seq.Sink{user = midi, note_on = on, note_off = off}
+}
+
 midi_note_on :: proc(midi: ^Midi_Out, channel, number, velocity: i32) {
 	if channel < 0 || channel >= 16 do return
 	if number < 0 || number >= 128 do return
@@ -54,6 +66,23 @@ midi_note_on :: proc(midi: ^Midi_Out, channel, number, velocity: i32) {
 			0,
 			pm.MessageMake(0x90 | c.int(channel), c.int(number), c.int(velocity)),
 		)
+	}
+}
+
+// Emit note-off for every (channel, key) that still has a held count.
+// Used to flush the output when the sequencer is torn down or killed.
+midi_all_notes_off :: proc(midi: ^Midi_Out) {
+	for channel: i32 = 0; channel < 16; channel += 1 {
+		for number: i32 = 0; number < 128; number += 1 {
+			if midi.key_counts[channel][number] > 0 {
+				pm.WriteShort(
+					midi.stream,
+					0,
+					pm.MessageMake(0x80 | c.int(channel), c.int(number), 0),
+				)
+				midi.key_counts[channel][number] = 0
+			}
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
-import "core:time"
+import rl "vendor:raylib"
+import "seq"
 
 
 SOURCE :: `
@@ -8,14 +9,21 @@ A = [
     (0,   0.4, (60, 100)),
     (0.5, 0.4, (62, 100)),
     (1,   0.4, (64, 100)),
-    (1.5, 0.4, (67, 100))
-]
-
-B = [
-    (0, A),
+    (1.5, 0.4, (67, 100)),
     (2, A)
 ]
 `
+
+
+// Parse the DSL source, install it as the sequencer's root, and ready it
+// for playback.
+load_song :: proc(sequencer: ^seq.Sequencer, source: string) -> bool {
+	root, ok := seq.parse_source(sequencer, source)
+	if !ok do return false
+	sequencer.root = root
+	seq.start_sequencer(sequencer)
+	return true
+}
 
 
 main :: proc() {
@@ -23,26 +31,26 @@ main :: proc() {
 	if !midi_open(&midi) do return
 	defer midi_close(&midi)
 
-	sequencer := make_sequencer()
-	defer destroy_sequencer(&sequencer)
-	sequencer.midi = &midi
+	sequencer := seq.make_sequencer()
+	defer seq.destroy_sequencer(&sequencer)
+	sequencer.sink = midi_sink(&midi)
 	sequencer.tempo = 120
 
-	root, ok := parse_source(&sequencer, SOURCE)
-	if !ok do return
-	sequencer.root = root
+	if !load_song(&sequencer, SOURCE) do return
 
-	start_sequencer(&sequencer)
+	rl.InitWindow(480, 120, "midiseq")
+	defer rl.CloseWindow()
+	rl.SetTargetFPS(120)
 
-	last := time.now()
-	for {
-		now := time.now()
-		dt := f32(time.duration_seconds(time.diff(last, now)))
-		last = now
-		sequencer_tick(&sequencer, dt)
-		if sequencer_finished(&sequencer) do break
-		time.sleep(1 * time.Millisecond)
+	for !rl.WindowShouldClose() && !seq.sequencer_finished(&sequencer) {
+		seq.sequencer_tick(&sequencer, rl.GetFrameTime())
+
+		rl.BeginDrawing()
+		rl.ClearBackground(rl.BLACK)
+		rl.DrawText("Playing. Esc to stop.", 20, 40, 20, rl.RAYWHITE)
+		rl.EndDrawing()
 	}
 
-	time.sleep(100 * time.Millisecond)
+	midi_all_notes_off(&midi)
+	rl.WaitTime(0.05)
 }

@@ -1,4 +1,4 @@
-package main
+package seq
 
 
 DEFAULT_POOL_BYTES :: 32 * 1024 * 1024
@@ -24,7 +24,7 @@ Note :: struct {
 //   first - head of the sibling chain
 //   channel - MIDI channel (0..15) for Notes in this Timeline
 //
-// Runtime:
+// Runtime (set on an instance, not on authoring templates):
 //   cursor - next sibling Event that has yet to be started
 //   active_head - head of the active chain (currently-sounding children),
 //     linked via Event.active_next
@@ -51,15 +51,26 @@ Event :: struct {
 	active_next: Event_Index,
 }
 
-// The Sequencer owns the pool and the root Event. MIDI output is
-// delegated to a Midi_Out (which handles ref-counted note-on/note-off
-// coalescing).
+
+// Where the sequencer sends its output. The library is deliberately
+// agnostic about the actual backend — PortMidi, an in-process synth, a
+// logger, whatever. A driver installs the procs and the opaque user
+// pointer gets passed through on every call.
+Sink :: struct {
+	user:     rawptr,
+	note_on:  proc(user: rawptr, channel, number, velocity: i32),
+	note_off: proc(user: rawptr, channel, number: i32),
+}
+
+
+// The Sequencer owns the pool and the root Event. Output flows through
+// the installed Sink.
 Sequencer :: struct {
 	tempo: f32, // beats per minute
 	beat:  f32, // current playhead, in beats
 	root:  Event_Index,
 	pool:  Pool(Event),
-	midi:  ^Midi_Out,
+	sink:  Sink,
 }
 
 
@@ -136,10 +147,25 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 	timeline.active_head = NIL_EVENT
 }
 
-// Advance the playhead by `dt` seconds and play whatever falls in the window.
+// Advance the playhead by `dt` seconds, tick the root, and adopt any
+// spawned Timeline instances into the root's active chain.
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
-	play_timeline(sequencer, sequencer.root, sequencer.beat)
+
+	spawn_head := play_timeline(sequencer, sequencer.root, sequencer.beat)
+	if spawn_head == NIL_EVENT do return
+
+	root_event := event_get(sequencer, sequencer.root)
+	root_tl := &root_event.kind.(Timeline)
+
+	tail := spawn_head
+	for {
+		e := event_get(sequencer, tail)
+		if e.active_next == NIL_EVENT do break
+		tail = e.active_next
+	}
+	event_get(sequencer, tail).active_next = root_tl.active_head
+	root_tl.active_head = spawn_head
 }
 
 // The root has nothing pending and nothing sounding.
@@ -152,37 +178,65 @@ sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
 
 // ===== Play =====
 
+@(private)
+sink_note_on :: proc(sink: ^Sink, channel, number, velocity: i32) {
+	if sink.note_on != nil do sink.note_on(sink.user, channel, number, velocity)
+}
+
+@(private)
+sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
+	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
+}
+
 // Advance the Timeline rooted at `timeline_event_idx` to `local_time`
-// (in beats, relative to that Timeline's own start). Two passes:
-//   1. Start any pending events whose beat has been reached.
-//   2. Tick active nested Timelines recursively; unlink anything that
-//      has finished.
-// A Note is finished at start_beat + duration. A Timeline is finished
-// when it has no pending events and nothing currently sounding.
-play_timeline :: proc(sequencer: ^Sequencer, timeline_event_idx: Event_Index, local_time: f32) {
+// (in beats, relative to that Timeline's own start) and return a chain of
+// newly-spawned Timeline instances for the caller to adopt.
+//
+//   Authoring events are immutable templates. Every event that fires at
+//   playback (Note or Timeline) becomes a freshly-allocated instance from
+//   the pool. Note-instances live in this timeline's own active chain;
+//   Timeline-instances are returned in the spawn chain instead (flattens
+//   nested recursion — the child finishes without holding the grandchild).
+//
+//   On completion, instances are freed back to the pool.
+play_timeline :: proc(
+	sequencer: ^Sequencer,
+	timeline_event_idx: Event_Index,
+	local_time: f32,
+) -> Event_Index {
 	timeline_event := event_get(sequencer, timeline_event_idx)
 	timeline := &timeline_event.kind.(Timeline)
 
-	// Pass 1: start pending events.
+	spawn_head := NIL_EVENT
+
+	// Pass 1: walk the authoring cursor, alloc an instance per fired event.
 	for timeline.cursor != NIL_EVENT {
 		cursor_event := event_get(sequencer, timeline.cursor)
 		if cursor_event.beat > local_time do break
 
-		switch k in cursor_event.kind {
+		new_idx := event_alloc(sequencer)
+		if new_idx == NIL_EVENT do break // pool exhausted; try again next tick
+		new_event := event_get(sequencer, new_idx)
+		new_event.beat = cursor_event.beat
+		new_event.kind = cursor_event.kind
+
+		switch k in new_event.kind {
 		case Note:
-			midi_note_on(sequencer.midi, timeline.channel, k.number, k.velocity)
+			new_event.active_next = timeline.active_head
+			timeline.active_head = new_idx
+			sink_note_on(&sequencer.sink, timeline.channel, k.number, k.velocity)
 		case Timeline:
-			child := &cursor_event.kind.(Timeline)
-			child.cursor = child.first
-			child.active_head = NIL_EVENT
+			inst_tl := &new_event.kind.(Timeline)
+			inst_tl.cursor = inst_tl.first
+			inst_tl.active_head = NIL_EVENT
+			new_event.active_next = spawn_head
+			spawn_head = new_idx
 		}
 
-		cursor_event.active_next = timeline.active_head
-		timeline.active_head = timeline.cursor
 		timeline.cursor = cursor_event.next
 	}
 
-	// Pass 2: tick active children, unlink those that have finished.
+	// Pass 2: tick active, free finished, collect sub-spawns.
 	prev_idx := NIL_EVENT
 	current := timeline.active_head
 	for current != NIL_EVENT {
@@ -193,11 +247,23 @@ play_timeline :: proc(sequencer: ^Sequencer, timeline_event_idx: Event_Index, lo
 		switch k in current_event.kind {
 		case Note:
 			if current_event.beat + k.duration <= local_time {
-				midi_note_off(sequencer.midi, timeline.channel, k.number)
+				sink_note_off(&sequencer.sink, timeline.channel, k.number)
 				finished = true
 			}
 		case Timeline:
-			play_timeline(sequencer, current, local_time - current_event.beat)
+			sub_head := play_timeline(sequencer, current, local_time - current_event.beat)
+			if sub_head != NIL_EVENT {
+				sub_tail := sub_head
+				walker := sub_head
+				for walker != NIL_EVENT {
+					we := event_get(sequencer, walker)
+					we.beat += current_event.beat
+					sub_tail = walker
+					walker = we.active_next
+				}
+				event_get(sequencer, sub_tail).active_next = spawn_head
+				spawn_head = sub_head
+			}
 			child := &current_event.kind.(Timeline)
 			finished = child.cursor == NIL_EVENT && child.active_head == NIL_EVENT
 		}
@@ -208,10 +274,13 @@ play_timeline :: proc(sequencer: ^Sequencer, timeline_event_idx: Event_Index, lo
 			} else {
 				event_get(sequencer, prev_idx).active_next = next
 			}
+			event_free(sequencer, current)
 		} else {
 			prev_idx = current
 		}
 
 		current = next
 	}
+
+	return spawn_head
 }

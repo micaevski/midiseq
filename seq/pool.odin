@@ -1,4 +1,4 @@
-package main
+package seq
 
 
 // A fixed-capacity object pool with a free list.
