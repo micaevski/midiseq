@@ -22,7 +22,7 @@ PART_A = [
     CHORD_A(1)
     CHORD_A(2)
     CHORD_A(3)
-    PART_B(2)
+    PART_A(2, trans=3)
 ]
 
 PART_B = [
@@ -33,8 +33,12 @@ PART_B = [
     PART_A(4)
 ]
 
+NOTE = [  note( 0 C5 vel=85 dur=0.3 )]
+
 SONG = [
-    PART_A(0)
+    NOTE(0)
+    NOTE(0.5, trans=3)
+    SONG(3, trans=5)
 ]
 
 

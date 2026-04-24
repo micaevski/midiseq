@@ -29,10 +29,11 @@ Note :: struct {
 //   active_head - head of the active chain (currently-sounding children),
 //     linked via Event.active_next
 Timeline :: struct {
-	first:       Event_Index,
-	cursor:      Event_Index,
-	active_head: Event_Index,
-	channel:     i32,
+	first:         Event_Index,
+	cursor:        Event_Index,
+	active_head:   Event_Index,
+	channel:       i32,
+	transposition: i32, // semitones; accumulates from parent to child
 }
 
 Event_Kind :: union {
@@ -224,11 +225,17 @@ play_timeline :: proc(
 		case Note:
 			new_event.active_next = timeline.active_head
 			timeline.active_head = new_idx
-			sink_note_on(&sequencer.sink, timeline.channel, k.number, k.velocity)
+			sink_note_on(
+				&sequencer.sink,
+				timeline.channel,
+				k.number + timeline.transposition,
+				k.velocity,
+			)
 		case Timeline:
 			new_timeline := &new_event.kind.(Timeline)
 			new_timeline.cursor = new_timeline.first
 			new_timeline.active_head = NIL_EVENT
+			new_timeline.transposition += timeline.transposition
 			new_event.active_next = spawn_head
 			spawn_head = new_idx
 		}
@@ -247,7 +254,11 @@ play_timeline :: proc(
 		switch k in current_event.kind {
 		case Note:
 			if current_event.beat + k.duration <= local_time {
-				sink_note_off(&sequencer.sink, timeline.channel, k.number)
+				sink_note_off(
+					&sequencer.sink,
+					timeline.channel,
+					k.number + timeline.transposition,
+				)
 				finished = true
 			}
 		case Timeline:

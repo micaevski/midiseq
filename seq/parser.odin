@@ -171,12 +171,40 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Event_Index) ->
 	if !expect(p, '(') do return false
 	beat, ok_b := parse_number(p)
 	if !ok_b {parse_error(p, "expected time"); return false}
+
+	trans: i32 = 0
+	for {
+		skip_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unterminated reference")
+			return false
+		}
+		if p.src[p.pos] == ')' do break
+
+		arg_name, ok_a := parse_ident(p)
+		if !ok_a {parse_error(p, "expected argument name or ')'"); return false}
+		if !expect(p, '=') do return false
+
+		switch arg_name {
+		case "trans":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected transposition"); return false}
+			trans = i32(v)
+		case:
+			parse_error(p, "unknown reference argument: %s", arg_name)
+			return false
+		}
+	}
 	if !expect(p, ')') do return false
 
 	// Stash the target's index in `first`. It gets rewritten to the
 	// target's actual children chain head by resolve_references after
 	// every top-level body has been parsed.
-	add_event(sequencer, parent, Event{beat = beat, kind = Timeline{first = target}})
+	add_event(
+		sequencer,
+		parent,
+		Event{beat = beat, kind = Timeline{first = target, transposition = trans}},
+	)
 	return true
 }
 
