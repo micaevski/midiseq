@@ -8,24 +8,21 @@ import rl "vendor:raylib"
 
 // Animation state for a single sounding note inside a lane.
 Vis_Note :: struct {
-	number:   i32,
-	velocity: i32,
-	appear:   f32, // seconds since first seen, capped at APPEAR_TIME
-	fade:     f32, // seconds since last seen; 0 while still sounding
-	seen:     bool,
+	number: i32,
+	appear: f32, // seconds since first seen, capped at APPEAR_TIME
+	fade:   f32, // seconds since last seen; 0 while still sounding
+	seen:   bool,
 }
 
-// Animation state for one active timeline. Each active timeline (root or
-// spawned) gets its own lane; lanes pop in on appear and fade out when
-// the timeline retires. `source_idx` is the source ref the runtime
-// timeline was cloned from — used to look up the lane's name.
+// One lane per active source ref. With the flat runtime model, multiple
+// runtime instances of the same source ref collapse into a single lane.
+// `source_idx` is the lane's stable key.
 Vis_Lane :: struct {
-	timeline_idx: seq.Runtime_Index,
-	source_idx:   seq.Source_Index,
-	notes:        [dynamic]Vis_Note,
-	appear:       f32,
-	fade:         f32,
-	seen:         bool,
+	source_idx: seq.Source_Index,
+	notes:      [dynamic]Vis_Note,
+	appear:     f32,
+	fade:       f32,
+	seen:       bool,
 }
 
 Visualizer :: struct {
@@ -51,11 +48,11 @@ NOTE_LO :: f32(36) // C2
 NOTE_HI :: f32(96) // C7
 
 @(private = "file")
-find_lane :: proc(vis: ^Visualizer, idx: seq.Runtime_Index) -> int {
+find_lane :: proc(vis: ^Visualizer, source_idx: seq.Source_Index) -> int {
 	for i in 0 ..< len(vis.lanes) {
-		if vis.lanes[i].timeline_idx == idx do return i
+		if vis.lanes[i].source_idx == source_idx do return i
 	}
-	append(&vis.lanes, Vis_Lane{timeline_idx = idx})
+	append(&vis.lanes, Vis_Lane{source_idx = source_idx})
 	return len(vis.lanes) - 1
 }
 
@@ -69,34 +66,6 @@ find_note :: proc(lane: ^Vis_Lane, number: i32) -> int {
 	}
 	append(&lane.notes, Vis_Note{number = number})
 	return len(lane.notes) - 1
-}
-
-// Walk the active chain of the given timeline and mark each Note entry
-// as seen on `lane`. The runtime model only ever puts Notes directly in
-// a timeline's active_head — sub-timelines bubble up to the root — so
-// this is a single non-recursive pass. The owning timeline's
-// transposition is added to each note number so what we draw matches
-// the pitch that was actually sent to MIDI.
-@(private = "file")
-collect_notes :: proc(
-	sequencer: ^seq.Sequencer,
-	lane: ^Vis_Lane,
-	timeline_idx: seq.Runtime_Index,
-) {
-	event := seq.runtime_get(sequencer, timeline_idx)
-	timeline := event.kind.(seq.Runtime_Timeline)
-
-	current := timeline.active_head
-	for current != seq.NIL_RUNTIME {
-		e := seq.runtime_get(sequencer, current)
-		if note, ok := e.kind.(seq.Note); ok {
-			sounding := note.number + timeline.transposition
-			ni := find_note(lane, sounding)
-			lane.notes[ni].velocity = note.velocity
-			lane.notes[ni].seen = true
-		}
-		current = e.active_next
-	}
 }
 
 @(private = "file")
@@ -114,13 +83,13 @@ lane_color :: proc(i: int, alpha: u8) -> rl.Color {
 	return c
 }
 
-// Walk the runtime tree from runtime_root, refresh each lane and note's
-// animation state, and render the result inside `area`. Lanes pop in
-// when they appear and shrink/fade when their timeline retires; notes
-// pop in with a small overshoot and shrink away on note-off.
+// Walk the sequencer's flat active chain. Each Runtime_Timeline pins
+// its lane as still-seen this frame; each Runtime_Note finds the lane
+// for its `parent_source_idx` and is registered there. The root
+// timeline (and any notes parented by it) are skipped — their lane
+// would be visually noisy and isn't useful.
 draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectangle, dt: f32) {
 	rl.DrawRectangleRec(area, rl.Color{18, 18, 24, 255})
-	if sequencer.runtime_root == seq.NIL_RUNTIME do return
 
 	for i in 0 ..< len(vis.lanes) {
 		vis.lanes[i].seen = false
@@ -129,32 +98,21 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 		}
 	}
 
-	// The root's active chain is the only one that holds Timeline
-	// entries — sub-timelines bubble up to it during play. Walk it once:
-	// notes feed the root lane; each Timeline gets its own lane.
-	root := seq.runtime_get(sequencer, sequencer.runtime_root)
-	root_timeline := root.kind.(seq.Runtime_Timeline)
-
-	root_lane_i := find_lane(vis, sequencer.runtime_root)
-	vis.lanes[root_lane_i].seen = true
-	vis.lanes[root_lane_i].source_idx = root_timeline.source_idx
-
-	current := root_timeline.active_head
+	current := sequencer.active_head
 	for current != seq.NIL_RUNTIME {
 		e := seq.runtime_get(sequencer, current)
 		next := e.active_next
 		switch k in e.kind {
-		case seq.Note:
-			sounding := k.number + root_timeline.transposition
-			lane := &vis.lanes[find_lane(vis, sequencer.runtime_root)]
-			ni := find_note(lane, sounding)
-			lane.notes[ni].velocity = k.velocity
+		case seq.Runtime_Note:
+			// find_lane may grow vis.lanes; resolve the index first so
+			// the slice access uses the post-append backing buffer.
+			li := find_lane(vis, k.parent_source_idx)
+			lane := &vis.lanes[li]
+			ni := find_note(lane, k.number)
 			lane.notes[ni].seen = true
 		case seq.Runtime_Timeline:
-			li := find_lane(vis, current)
+			li := find_lane(vis, k.source_idx)
 			vis.lanes[li].seen = true
-			vis.lanes[li].source_idx = k.source_idx
-			collect_notes(sequencer, &vis.lanes[li], current)
 		}
 		current = next
 	}
@@ -243,7 +201,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 
 			t_pos := clamp((f32(n.number) - NOTE_LO) / note_range, 0, 1)
 			x := notes_left + t_pos * notes_w
-			radius := (14 + f32(n.velocity) * 0.10) * n_scale
+			radius := f32(18) * n_scale
 
 			rl.DrawCircleV(rl.Vector2{x, baseline}, radius, col)
 

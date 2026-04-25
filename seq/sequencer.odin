@@ -54,32 +54,42 @@ Source_Event :: struct {
 
 // ===== Runtime pool =====
 
+// Runtime_Note is the in-flight version of a fired Note. The parent
+// timeline that fired it may retire before the note finishes, so the
+// note carries everything note-off needs:
+//
+//   number             — already transposed (source.number + parent.transposition).
+//   duration           — already root-time (source.duration / parent.rate).
+//   parent_source_idx  — the source ref that fired this note. Used to
+//                        look up the channel (and the ref's name).
+Runtime_Note :: struct {
+	number:            i32,
+	duration:          f32,
+	parent_source_idx: Source_Index,
+}
+
 // Runtime_Timeline is a live instance of a Source_Timeline.
 //
-//   cursor      — position in the *source* child chain we're firing from.
-//                 Walks `next` links in the source pool; advances during
-//                 play and stops at NIL_SOURCE.
-//   active_head — head of currently-sounding child runtime instances.
-//   source_idx  — the source ref event this runtime was cloned from.
-//                 Stable for the life of the instance — used to look up
-//                 the channel (`source_get(s, source_idx).kind`) and the
-//                 ref's name in `Sequencer.names`.
-//   transposition / rate — already accumulated from parent at clone time.
+//   cursor               — position in the *source* child chain we're firing from.
+//                          Walks `next` links in the source pool.
+//   source_idx           — the source ref event this runtime was cloned from.
+//                          Used to look up the ref's channel and name.
+//   transposition / rate — accumulated from ancestors at clone time.
 Runtime_Timeline :: struct {
 	cursor:        Source_Index,
-	active_head:   Runtime_Index,
 	source_idx:    Source_Index,
 	transposition: i32,
 	rate:          f32,
 }
 
 Runtime_Kind :: union {
-	Note,
+	Runtime_Note,
 	Runtime_Timeline,
 }
 
 // Runtime_Event lives in the runtime pool and is created during playback.
-// `active_next` links into its parent timeline's active chain.
+// `beat` is in root-time; `active_next` links into the sequencer's
+// single flat active chain.
 Runtime_Event :: struct {
 	beat:        f32,
 	kind:        Runtime_Kind,
@@ -113,13 +123,16 @@ Names :: struct {
 // The Sequencer holds two pools:
 //   source_pool  - authored source events, written by the parser.
 //   runtime_pool - transient instances created during playback.
-// `source_root` is the authored root. `runtime_root` is a fresh runtime
-// clone of it, re-created every time start_sequencer is called.
+// `source_root` is the authored root. `active_head`/`active_tail` form
+// the single flat chain of all live runtime events (notes and
+// timelines), built from a fresh clone of the root every time
+// start_sequencer is called.
 Sequencer :: struct {
 	tempo:        f32,
 	beat:         f32,
 	source_root:  Source_Index,
-	runtime_root: Runtime_Index,
+	active_head:  Runtime_Index,
+	active_tail:  Runtime_Index,
 	source_pool:  Pool(Source_Event),
 	runtime_pool: Pool(Runtime_Event),
 	sink:         Sink,
@@ -152,10 +165,6 @@ destroy_sequencer :: proc(sequencer: ^Sequencer) {
 // Source-pool wrappers (parser side).
 source_alloc :: proc(sequencer: ^Sequencer) -> Source_Index {
 	return Source_Index(pool_alloc(&sequencer.source_pool))
-}
-
-source_free :: proc(sequencer: ^Sequencer, index: Source_Index) {
-	pool_free(&sequencer.source_pool, u32(index))
 }
 
 source_get :: proc(sequencer: ^Sequencer, index: Source_Index) -> ^Source_Event {
@@ -221,8 +230,9 @@ add_source_event :: proc(
 
 // ===== Sequencer driver =====
 
-// Reset the runtime pool and allocate a fresh root instance cloned from
-// the authored root source. Safe to call repeatedly (Stop -> Start).
+// Reset the runtime pool, allocate a fresh root timeline instance, and
+// install it as the only entry on the active chain. Safe to call
+// repeatedly (Stop -> Start).
 start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.beat = 0
 
@@ -230,7 +240,6 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.runtime_pool.count = 1
 	sequencer.runtime_pool.free_head = 0
 
-	// Clone the authored root as a fresh runtime instance.
 	source := source_get(sequencer, sequencer.source_root)
 	source_timeline := source.kind.(Source_Timeline)
 
@@ -239,40 +248,88 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 	root_event.beat = 0
 	root_event.kind = Runtime_Timeline {
 		cursor        = source_timeline.first,
-		active_head   = NIL_RUNTIME,
 		source_idx    = sequencer.source_root,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
 	}
-	sequencer.runtime_root = root_idx
+	root_event.active_next = NIL_RUNTIME
+
+	sequencer.active_head = root_idx
+	sequencer.active_tail = root_idx
 }
 
-// Advance the playhead by `dt` seconds, tick the root instance, and
-// adopt any spawned Timeline instances into its active chain.
+// Advance the playhead by `dt` seconds and drive playback.
+//
+// One single-pass walk over the active chain:
+//
+//   - Runtime_Note: retire (note-off + free) when its end time has
+//     been reached.
+//   - Runtime_Timeline: tick its cursor via `play_timeline`, append
+//     the returned chain (already in root-time) onto `active_tail`.
+//     The walk re-reads `active_next` after the append, so newly
+//     spawned events are visited later in this same tick. The
+//     timeline retires when its cursor empties; its in-flight notes
+//     outlive it and retire on their own when their duration runs out.
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
-	spawn_head := play_timeline(sequencer, sequencer.runtime_root, sequencer.beat)
-	if spawn_head == NIL_RUNTIME do return
+	prev := NIL_RUNTIME
+	cur := sequencer.active_head
+	for cur != NIL_RUNTIME {
+		event := runtime_get(sequencer, cur)
 
-	root_event := runtime_get(sequencer, sequencer.runtime_root)
-	root_timeline := &root_event.kind.(Runtime_Timeline)
+		finished: bool
+		switch k in event.kind {
+		case Runtime_Note:
+			if event.beat + k.duration <= sequencer.beat {
+				sink_note_off(
+					&sequencer.sink,
+					channel_of(sequencer, k.parent_source_idx),
+					k.number,
+				)
+				finished = true
+			}
+		case Runtime_Timeline:
+			sub_local := (sequencer.beat - event.beat) * k.rate
+			spawn_head, spawn_tail := play_timeline(sequencer, cur, sub_local)
+			if spawn_head != NIL_RUNTIME {
+				// Append onto the active chain's tail. Re-reading `next`
+				// below picks up these spawns when `cur` was the old tail.
+				if sequencer.active_tail == NIL_RUNTIME {
+					sequencer.active_head = spawn_head
+				} else {
+					runtime_get(sequencer, sequencer.active_tail).active_next = spawn_head
+				}
+				sequencer.active_tail = spawn_tail
+			}
+			// Re-read after potential append (`event` still valid; the
+			// runtime pool is a fixed slice).
+			finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE
+		}
 
-	tail := spawn_head
-	for {
-		event := runtime_get(sequencer, tail)
-		if event.active_next == NIL_RUNTIME do break
-		tail = event.active_next
+		next := event.active_next
+
+		if finished {
+			if prev == NIL_RUNTIME {
+				sequencer.active_head = next
+			} else {
+				runtime_get(sequencer, prev).active_next = next
+			}
+			if cur == sequencer.active_tail {
+				sequencer.active_tail = prev
+			}
+			runtime_free(sequencer, cur)
+		} else {
+			prev = cur
+		}
+		cur = next
 	}
-	runtime_get(sequencer, tail).active_next = root_timeline.active_head
-	root_timeline.active_head = spawn_head
 }
 
-// The root instance has nothing pending and nothing sounding.
+
+// Nothing is in flight.
 sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
-	root := runtime_get(sequencer, sequencer.runtime_root)
-	timeline := root.kind.(Runtime_Timeline)
-	return timeline.cursor == NIL_SOURCE && timeline.active_head == NIL_RUNTIME
+	return sequencer.active_head == NIL_RUNTIME
 }
 
 
@@ -288,13 +345,12 @@ sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
 	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
 }
 
-// Look up the channel a runtime timeline should emit on by reading the
-// authored channel off its source ref. Channel doesn't accumulate from
-// parent (unlike transposition/rate), so it lives only on the source
-// side.
+// Look up the channel authored on a Source_Timeline. Used at note-on
+// (via the timeline's own `source_idx`) and note-off (via the note's
+// `parent_source_idx`).
 @(private)
-runtime_channel :: proc(sequencer: ^Sequencer, t: Runtime_Timeline) -> i32 {
-	return source_get(sequencer, t.source_idx).kind.(Source_Timeline).channel
+channel_of :: proc(sequencer: ^Sequencer, src: Source_Index) -> i32 {
+	return source_get(sequencer, src).kind.(Source_Timeline).channel
 }
 
 // xorshift32. Remaps 0 to a fixed non-zero so an un-seeded sequencer
@@ -310,27 +366,30 @@ rand_u32 :: proc(state: ^u32) -> u32 {
 	return x
 }
 
-// Advance the runtime Timeline instance at `timeline_event_idx` to
-// `local_time` (in beats, relative to that instance's own start) and
-// return a chain of newly-spawned Timeline instances for the caller to
-// adopt.
+// Walk one runtime timeline's source cursor up to `local_time` (in
+// beats, relative to that instance's own start). For each fired source
+// event, allocate a runtime event (firing note-on for notes) and
+// append it to a local spawn chain in firing order. Beats on spawned
+// events are translated into root-time using the timeline's own start
+// beat and accumulated rate, so the caller can splice the chain
+// straight onto the sequencer's active list.
 //
-//   Cursor walks the authored children chain in the source pool.
-//   Each fired event is copied into a fresh runtime instance.
-//   Note-instances join this timeline's own active chain; Timeline
-//   instances are returned via the spawn chain (flattens recursion).
-//   On completion, runtime instances are freed back to the runtime pool.
+// Returns the (head, tail) of the spawn chain so the caller can splice
+// in O(1) without re-walking.
 play_timeline :: proc(
 	sequencer: ^Sequencer,
 	timeline_event_idx: Runtime_Index,
 	local_time: f32,
-) -> Runtime_Index {
+) -> (
+	spawn_head: Runtime_Index,
+	spawn_tail: Runtime_Index,
+) {
 	timeline_event := runtime_get(sequencer, timeline_event_idx)
 	timeline := &timeline_event.kind.(Runtime_Timeline)
 
-	spawn_head := NIL_RUNTIME
+	spawn_head = NIL_RUNTIME
+	spawn_tail = NIL_RUNTIME
 
-	// Process events in the source and add them to the runtime active chain
 	for timeline.cursor != NIL_SOURCE {
 		cursor_event := source_get(sequencer, timeline.cursor)
 		if cursor_event.beat > local_time do break
@@ -347,95 +406,43 @@ play_timeline :: proc(
 		new_idx := runtime_alloc(sequencer)
 		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
 		runtime_event := runtime_get(sequencer, new_idx)
-		runtime_event.beat = cursor_event.beat
+		// Translate the source-domain beat into root-time. For the root
+		// timeline (rate=1, start=0) this is identity.
+		runtime_event.beat = cursor_event.beat / timeline.rate + timeline_event.beat
+		runtime_event.active_next = NIL_RUNTIME
 
 		switch k in cursor_event.kind {
 		case Note:
-			runtime_event.kind = k
-			runtime_event.active_next = timeline.active_head
-			timeline.active_head = new_idx
-			// fire notes
+			runtime_event.kind = Runtime_Note {
+				number            = k.number + timeline.transposition,
+				duration          = k.duration / timeline.rate,
+				parent_source_idx = timeline.source_idx,
+			}
 			sink_note_on(
 				&sequencer.sink,
-				runtime_channel(sequencer, timeline^),
+				channel_of(sequencer, timeline.source_idx),
 				k.number + timeline.transposition,
 				k.velocity,
 			)
 		case Source_Timeline:
-			// Build a fresh runtime instance, accumulating
-			// transposition/rate from the parent and remembering the
-			// source ref we cloned from.
 			runtime_event.kind = Runtime_Timeline {
 				cursor        = k.first,
-				active_head   = NIL_RUNTIME,
 				source_idx    = timeline.cursor,
 				transposition = k.transposition + timeline.transposition,
 				rate          = k.rate * timeline.rate,
 			}
-			// runtime timelines get added to the spawn list
-			runtime_event.active_next = spawn_head
-			spawn_head = new_idx
 		}
+
+		// Append (head→tail) so spawn_head stays in firing order.
+		if spawn_tail == NIL_RUNTIME {
+			spawn_head = new_idx
+		} else {
+			runtime_get(sequencer, spawn_tail).active_next = new_idx
+		}
+		spawn_tail = new_idx
 
 		timeline.cursor = cursor_event.next
 	}
 
-	// Recursively walk the active chain and retire any finished events, while bubbling up timelines.
-	prev_idx := NIL_RUNTIME
-	current := timeline.active_head
-	for current != NIL_RUNTIME {
-		current_event := runtime_get(sequencer, current)
-		next := current_event.active_next
-
-		finished: bool
-		switch k in current_event.kind {
-		case Note:
-			if current_event.beat + k.duration <= local_time {
-				sink_note_off(
-					&sequencer.sink,
-					runtime_channel(sequencer, timeline^),
-					k.number + timeline.transposition,
-				)
-				finished = true
-			}
-		case Runtime_Timeline:
-			child := &current_event.kind.(Runtime_Timeline)
-			// recursively play child timelines, accumulating spawns
-			sub_head := play_timeline(
-				sequencer,
-				current,
-				(local_time - current_event.beat) * child.rate,
-			)
-			// if there are child timelines spawned, append them to the spawn list.
-			if sub_head != NIL_RUNTIME {
-				sub_tail := sub_head
-				walker := sub_head
-				// Update the beat value to account for offset from the parent timeline and the rate scaling.
-				for walker != NIL_RUNTIME {
-					walker_event := runtime_get(sequencer, walker)
-					walker_event.beat = walker_event.beat / child.rate + current_event.beat
-					sub_tail = walker
-					walker = walker_event.active_next
-				}
-				runtime_get(sequencer, sub_tail).active_next = spawn_head
-				spawn_head = sub_head
-			}
-			finished = child.cursor == NIL_SOURCE && child.active_head == NIL_RUNTIME
-		}
-
-		if finished {
-			if prev_idx == NIL_RUNTIME {
-				timeline.active_head = next
-			} else {
-				runtime_get(sequencer, prev_idx).active_next = next
-			}
-			runtime_free(sequencer, current)
-		} else {
-			prev_idx = current
-		}
-
-		current = next
-	}
-
-	return spawn_head
+	return
 }
