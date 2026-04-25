@@ -2,6 +2,7 @@ package seq
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 
@@ -174,6 +175,12 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			top_event.chance = 100
 			top_event.kind = Source_Timeline{rate = 1}
 			p.symbols[name] = idx
+			// `LABEL: "path.mid"` form — skip the path here; pass_2
+			// loads the file.
+			skip_ws(p)
+			if p.pos < len(p.src) && p.src[p.pos] == '"' {
+				if _, ok_s := parse_string_literal(p); !ok_s do return false
+			}
 		case '=':
 			if name != "SEED" {
 				parse_error(p, "unexpected '='; only SEED uses '='")
@@ -236,6 +243,14 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 			)
 			current_parent = idx
 			last = idx
+			// `LABEL: "path.mid"` — read the MIDI file and add a Note
+			// child for each parsed note.
+			skip_ws(p)
+			if p.pos < len(p.src) && p.src[p.pos] == '"' {
+				path, ok_s := parse_string_literal(p)
+				if !ok_s do return NIL_SOURCE
+				if !load_midi_into(p, path, current_parent) do return NIL_SOURCE
+			}
 		case '=':
 			// SEED — already applied in pass_1, just consume the value.
 			p.pos += 1
@@ -257,6 +272,42 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 		}
 	}
 	return last
+}
+
+
+// Read `path` from disk, parse it as a Standard MIDI File, and add a
+// Note source-event to `parent` for each parsed note. Path is resolved
+// relative to the current working directory. On any failure (read or
+// MIDI parse), emits a parse_error and returns false; the caller bails
+// out of pass_2 and parse_source returns ok=false.
+@(private)
+load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index) -> bool {
+	bytes, read_err := os.read_entire_file(path, context.allocator)
+	if read_err != nil {
+		parse_error(p, "could not read midi file %q: %v", path, read_err)
+		return false
+	}
+	defer delete(bytes)
+
+	notes, ok := parse_midi_file(bytes)
+	if !ok {
+		parse_error(p, "could not parse midi file %q", path)
+		return false
+	}
+	defer delete(notes)
+
+	for n in notes {
+		add_source_event(
+			&p.source,
+			parent,
+			Source_Event {
+				beat = n.start_beat,
+				chance = NOTE_DEFAULT_CHANCE,
+				kind = Note{number = n.number, velocity = n.velocity, duration = n.duration},
+			},
+		)
+	}
+	return true
 }
 
 
@@ -464,6 +515,34 @@ expect :: proc(p: ^Parser, ch: u8) -> bool {
 	p.col += 1
 	return true
 }
+
+// Read a `"..."` literal. No escape sequences for now.
+@(private)
+parse_string_literal :: proc(p: ^Parser) -> (string, bool) {
+	skip_ws(p)
+	if p.pos >= len(p.src) || p.src[p.pos] != '"' do return "", false
+	p.pos += 1
+	p.col += 1
+	start := p.pos
+	for p.pos < len(p.src) && p.src[p.pos] != '"' {
+		if p.src[p.pos] == '\n' {
+			p.line += 1
+			p.col = 1
+		} else {
+			p.col += 1
+		}
+		p.pos += 1
+	}
+	if p.pos >= len(p.src) {
+		parse_error(p, "unterminated string literal")
+		return "", false
+	}
+	s := p.src[start:p.pos]
+	p.pos += 1
+	p.col += 1
+	return s, true
+}
+
 
 @(private)
 parse_ident :: proc(p: ^Parser) -> (string, bool) {

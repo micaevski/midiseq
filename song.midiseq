@@ -1,21 +1,16 @@
-CHORD = [
-    note( 0 C4 vel=30 )
-    note( 0 E4 vel=30 )
-    note( 0 G4 vel=30 )
-]
+BASS:
+note(0 C3 vel=50)
+note(1 F3 vel=30)
+note(2 G3 vel=30)
+note(3 B3 vel=30)
+note(4 D4 vel=30)
 
-BASS = [
-    note( 0   C3 vel=30 )
-    note( 1.5 F3 vel=30 )
-    note( 2.5 A2 vel=30 )
-]
+RICK: "rick.mid"
 
-SONG = [
-    BASS(0)
-    BASS(3)
-    BASS(5)
-    CHORD(0)
-    CHORD(2 trans=2)
-    CHORD(3.5 trans=5)
-    SONG(8)
-]
+PART:
+BASS(0)
+DRUMS(0)
+PART(5)
+
+SONG:
+RICK(0)
