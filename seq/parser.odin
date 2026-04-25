@@ -50,9 +50,21 @@ destroy_parser :: proc(p: ^Parser) {
 
 // Parse `src` into the parser's own buffers. On success, the caller
 // swaps `parser.source`/`parser.names` into the live sequencer and
-// uses the returned root index. References inside a list must resolve
-// to a timeline that has already been defined earlier in the source.
-// The last definition becomes the root.
+// uses the returned root index.
+//
+// Syntax (one element per line is the natural style; whitespace and
+// blank lines are insignificant):
+//
+//   IDENT:                       // begins a top-level definition
+//   note(beat pitch [vel=V] [dur=D] [chance=C])
+//   NAME(beat [trans=T] [rate=R] [chance=C])
+//   ...
+//   IDENT:                       // begins the next top-level definition
+//
+//   SEED = N                     // optional directive
+//
+// A name reference must resolve to a timeline that has already been
+// defined earlier in the file. The last definition becomes the root.
 parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
 	// Wipe any leftovers from a previous parse (or from buffers we
 	// just received via swap on a previous successful reparse).
@@ -75,12 +87,12 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	parse_alloc := mem.arena_allocator(&arena)
 	parser.symbols = make(map[string]Source_Index, 16, parse_alloc)
 
-	// Pass 1: discover every top-level `IDENT = [...]` and reserve a
-	// Timeline event for it. Bodies are skipped by balancing brackets.
+	// Pass 1: discover every `IDENT:` header and reserve a Timeline
+	// event for it. Element calls are skipped by balancing parens.
 	if !pass_1(parser) do return NIL_SOURCE, false
 
-	// Pass 2: parse each body and populate its Timeline. References
-	// stash the target's index in their `first` field (unresolved).
+	// Pass 2: walk the source again. Each `IDENT:` rebinds the current
+	// parent; each element call is added to that parent.
 	parser.pos = 0
 	parser.line = 1
 	parser.col = 1
@@ -123,6 +135,10 @@ resolve_references :: proc(p: ^Parser) {
 }
 
 
+// Pass 1: walk the source linearly. Each `IDENT:` reserves a Timeline
+// slot in the source store; element calls (`name(...)`) are skipped
+// over via balanced parens. The `SEED = N` directive is consumed here
+// (and again in pass 2).
 @(private)
 pass_1 :: proc(p: ^Parser) -> bool {
 	for {
@@ -134,98 +150,157 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			parse_error(p, "expected identifier")
 			return false
 		}
-		if !expect(p, '=') do return false
 
-		// Top-level directives: `SEED = N` sets the RNG seed.
-		if name == "SEED" {
+		skip_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unexpected end of file after %s", name)
+			return false
+		}
+
+		switch p.src[p.pos] {
+		case ':':
+			p.pos += 1
+			p.col += 1
+			if name == "SEED" {
+				parse_error(p, "SEED uses '=', not ':'")
+				return false
+			}
+			idx := source_alloc(&p.source)
+			if idx == NIL_SOURCE {
+				parse_error(p, "source storage full")
+				return false
+			}
+			top_event := source_get(&p.source, idx)
+			top_event.chance = 100
+			top_event.kind = Source_Timeline{rate = 1}
+			p.symbols[name] = idx
+		case '=':
+			if name != "SEED" {
+				parse_error(p, "unexpected '='; only SEED uses '='")
+				return false
+			}
+			p.pos += 1
+			p.col += 1
 			n, n_ok := parse_number(p)
 			if !n_ok {parse_error(p, "expected SEED value"); return false}
 			p.rng_state = u32(n)
-			continue
-		}
-
-		idx := source_alloc(&p.source)
-		if idx == NIL_SOURCE {
-			parse_error(p, "source storage full")
+		case '(':
+			// Element call body — skip over balanced parens.
+			if !skip_call_args(p) do return false
+		case:
+			parse_error(p, "expected ':', '=' or '(' after %s", name)
 			return false
 		}
-		top_event := source_get(&p.source, idx)
-		top_event.chance = 100
-		top_event.kind = Source_Timeline{rate = 1}
-
-		p.symbols[name] = idx
-
-		if !skip_list(p) do return false
 	}
 	return true
 }
 
 
+// Pass 2: walk the source again. Each `IDENT:` rebinds the current
+// parent; each element call is added into that parent. Refs stash the
+// target's index in their `first` field — `resolve_references` rewrites
+// it into the target's children-chain head once all bodies are populated.
 @(private)
 pass_2 :: proc(p: ^Parser) -> Source_Index {
 	last := NIL_SOURCE
+	current_parent := NIL_SOURCE
+
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
 
 		name, ok := parse_ident(p)
-		if !ok do return NIL_SOURCE
-		if !expect(p, '=') do return NIL_SOURCE
-
-		// SEED was consumed in pass_1; skip over its value here.
-		if name == "SEED" {
-			_, _ = parse_number(p)
-			continue
+		if !ok {
+			parse_error(p, "expected identifier")
+			return NIL_SOURCE
 		}
 
-		idx := p.symbols[name]
-		// Names from p.src are slices into the caller-owned source
-		// string and disappear once parsing is done; clone into the
-		// parser's names arena so they survive the swap into the
-		// sequencer.
-		p.names.lookup[idx], _ = strings.clone(name, mem.arena_allocator(&p.names.arena))
-		if !parse_list_into(p, idx) do return NIL_SOURCE
+		skip_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unexpected end of file after %s", name)
+			return NIL_SOURCE
+		}
 
-		last = idx
+		switch p.src[p.pos] {
+		case ':':
+			p.pos += 1
+			p.col += 1
+			idx := p.symbols[name]
+			// Names from p.src are slices into the caller-owned source
+			// string and disappear once parsing is done; clone into the
+			// parser's names arena so they survive the swap into the
+			// sequencer.
+			p.names.lookup[idx], _ = strings.clone(
+				name,
+				mem.arena_allocator(&p.names.arena),
+			)
+			current_parent = idx
+			last = idx
+		case '=':
+			// SEED — already applied in pass_1, just consume the value.
+			p.pos += 1
+			p.col += 1
+			_, _ = parse_number(p)
+		case '(':
+			if current_parent == NIL_SOURCE {
+				parse_error(p, "%s(...) appears before any top-level definition", name)
+				return NIL_SOURCE
+			}
+			if name == "note" {
+				if !parse_note_call(p, current_parent) do return NIL_SOURCE
+			} else {
+				if !parse_ref_call(p, name, current_parent) do return NIL_SOURCE
+			}
+		case:
+			parse_error(p, "expected ':', '=' or '(' after %s", name)
+			return NIL_SOURCE
+		}
 	}
 	return last
 }
 
 
+// Skip a balanced `(...)` block starting at the current `(`.
 @(private)
-parse_list_into :: proc(p: ^Parser, parent: Source_Index) -> bool {
-	if !expect(p, '[') do return false
-
-	for {
-		skip_ws(p)
-		if p.pos >= len(p.src) {
-			parse_error(p, "unterminated list")
-			return false
-		}
-		if p.src[p.pos] == ']' {
+skip_call_args :: proc(p: ^Parser) -> bool {
+	if p.pos >= len(p.src) || p.src[p.pos] != '(' {
+		parse_error(p, "expected '('")
+		return false
+	}
+	p.pos += 1
+	p.col += 1
+	depth := 1
+	for p.pos < len(p.src) && depth > 0 {
+		switch p.src[p.pos] {
+		case '(':
+			depth += 1
 			p.pos += 1
 			p.col += 1
-			return true
+		case ')':
+			depth -= 1
+			p.pos += 1
+			p.col += 1
+		case '\n':
+			p.pos += 1
+			p.line += 1
+			p.col = 1
+		case:
+			p.pos += 1
+			p.col += 1
 		}
-		if !parse_element(p, parent) do return false
 	}
+	if depth != 0 {
+		parse_error(p, "unterminated '('")
+		return false
+	}
+	return true
 }
 
 
-// An element is either a note call or a timeline reference call:
-//   note( TIME PITCH [vel=V] [dur=D] )
-//   NAME( TIME )
-// Commas between tokens are optional (treated as whitespace).
+// NAME( TIME [trans=T] [rate=R] [chance=C] ).
+// `name` has already been consumed; we're sitting on the `(`.
 @(private)
-parse_element :: proc(p: ^Parser, parent: Source_Index) -> bool {
-	name, ok := parse_ident(p)
-	if !ok {
-		parse_error(p, "expected 'note' or a timeline name")
-		return false
-	}
-
-	if name == "note" do return parse_note_call(p, parent)
-
+parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	target, exists := p.symbols[name]
 	if !exists {
 		parse_error(p, "undefined reference: %s", name)
@@ -519,39 +594,6 @@ parse_number :: proc(p: ^Parser) -> (f32, bool) {
 	}
 	n, ok := strconv.parse_f32(p.src[start:p.pos])
 	return n, ok
-}
-
-// Advance past a balanced '[' ... ']' block.
-@(private)
-skip_list :: proc(p: ^Parser) -> bool {
-	skip_ws(p)
-	if p.pos >= len(p.src) || p.src[p.pos] != '[' {
-		parse_error(p, "expected '['")
-		return false
-	}
-	depth := 0
-	for p.pos < len(p.src) {
-		switch p.src[p.pos] {
-		case '[':
-			depth += 1
-			p.pos += 1
-			p.col += 1
-		case ']':
-			depth -= 1
-			p.pos += 1
-			p.col += 1
-			if depth == 0 do return true
-		case '\n':
-			p.pos += 1
-			p.line += 1
-			p.col = 1
-		case:
-			p.pos += 1
-			p.col += 1
-		}
-	}
-	parse_error(p, "unterminated '['")
-	return false
 }
 
 @(private)
