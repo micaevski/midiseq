@@ -58,13 +58,19 @@ main :: proc() {
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(120)
 
+	load_ui_font()
+	defer unload_ui_font()
+
 	vis: Visualizer
 	defer destroy_visualizer(&vis)
 
 	playing := true
+	show_debug := false
 
 	for !rl.WindowShouldClose() {
 		dt := rl.GetFrameTime()
+		if rl.IsKeyPressed(.TAB) do show_debug = !show_debug
+
 		if playing && !seq.sequencer_finished(&sequencer) {
 			seq.sequencer_tick(&sequencer, dt)
 		}
@@ -100,7 +106,13 @@ main :: proc() {
 			240,
 		)
 
-		draw_active(&vis, &sequencer, rl.Rectangle{20, 160, 860, 580}, dt)
+		viz_area := rl.Rectangle{20, 160, 860, 580}
+		if show_debug {
+			debug_draw_source(&sequencer, viz_area)
+		} else {
+			draw_active(&vis, &sequencer, viz_area, dt)
+		}
+		ui_draw_text("[TAB] toggle debug", i32(viz_area.x) + 8, i32(viz_area.y + viz_area.height) - 20, 14, rl.GRAY)
 
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
