@@ -17,9 +17,11 @@ Vis_Note :: struct {
 
 // Animation state for one active timeline. Each active timeline (root or
 // spawned) gets its own lane; lanes pop in on appear and fade out when
-// the timeline retires.
+// the timeline retires. `source_idx` is the source ref the runtime
+// timeline was cloned from — used to look up the lane's name.
 Vis_Lane :: struct {
 	timeline_idx: seq.Runtime_Index,
+	source_idx:   seq.Source_Index,
 	notes:        [dynamic]Vis_Note,
 	appear:       f32,
 	fade:         f32,
@@ -135,6 +137,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 
 	root_lane_i := find_lane(vis, sequencer.runtime_root)
 	vis.lanes[root_lane_i].seen = true
+	vis.lanes[root_lane_i].source_idx = root_timeline.source_idx
 
 	current := root_timeline.active_head
 	for current != seq.NIL_RUNTIME {
@@ -150,6 +153,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 		case seq.Runtime_Timeline:
 			li := find_lane(vis, current)
 			vis.lanes[li].seen = true
+			vis.lanes[li].source_idx = k.source_idx
 			collect_notes(sequencer, &vis.lanes[li], current)
 		}
 		current = next
@@ -188,7 +192,8 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 		}
 	}
 
-	usable_w := area.width - 24
+	LABEL_ZONE_W :: f32(80)
+	NOTES_LEFT_PAD :: f32(16)
 	note_range := NOTE_HI - NOTE_LO
 
 	for i in 0 ..< len(vis.lanes) {
@@ -208,6 +213,24 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 		rl.DrawRectangleRounded(bg, 0.4, 6, rl.Color{30, 30, 42, alpha})
 
 		baseline := lane_y + LANE_HEIGHT * 0.5
+		col := lane_color(i, alpha)
+
+		// Lane label, lit by the lane color.
+		if name, has_name := sequencer.names.lookup[lane.source_idx]; has_name {
+			name_size: i32 = 16
+			ui_draw_text(
+				fmt.ctprintf("%s", name),
+				i32(area.x) + 20,
+				i32(baseline) - name_size / 2,
+				name_size,
+				col,
+			)
+		}
+
+		// Note bubbles live to the right of the label zone.
+		notes_left := area.x + 12 + LABEL_ZONE_W + NOTES_LEFT_PAD
+		notes_right := area.x + area.width - 12 - 12
+		notes_w := notes_right - notes_left
 
 		for j in 0 ..< len(lane.notes) {
 			n := lane.notes[j]
@@ -219,10 +242,9 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 			n_scale := n_ease * (1 - n_fade) * bounce
 
 			t_pos := clamp((f32(n.number) - NOTE_LO) / note_range, 0, 1)
-			x := area.x + 28 + t_pos * (usable_w - 20)
+			x := notes_left + t_pos * notes_w
 			radius := (14 + f32(n.velocity) * 0.10) * n_scale
 
-			col := lane_color(i, alpha)
 			rl.DrawCircleV(rl.Vector2{x, baseline}, radius, col)
 
 			// Tiny offset highlight makes the dots look like little orbs.
