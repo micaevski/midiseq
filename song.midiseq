@@ -1,0 +1,21 @@
+CHORD = [
+    note( 0 C4 vel=30 )
+    note( 0 E4 vel=30 )
+    note( 0 G4 vel=30 )
+]
+
+BASS = [
+    note( 0   C3 vel=30 )
+    note( 1.5 F3 vel=30 )
+    note( 2.5 A2 vel=30 )
+]
+
+SONG = [
+    BASS(0)
+    BASS(3)
+    BASS(5)
+    CHORD(0)
+    CHORD(2 trans=3)
+    CHORD(3.5 trans=5)
+    SONG(8)
+]

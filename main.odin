@@ -1,34 +1,12 @@
 package main
 
 import "core:fmt"
+import "core:os"
 import "seq"
 import rl "vendor:raylib"
 
 
-SOURCE :: `
-
-CHORD = [
-    note( 0 C4 vel=30 )
-    note( 0 E4 vel=30 )
-    note( 0 G4 vel=30 )
-]
-
-BASS = [
-    note( 0   C3 vel=30 )
-    note( 1.5 F3 vel=30 )
-    note( 2.5 A2 vel=30 )
-]
-
-SONG = [
-    BASS(0)
-    BASS(3)
-    BASS(5)
-    CHORD(0)
-    CHORD(2 trans=3)
-    CHORD(3.5 trans=5)
-    SONG(8)
-]
-`
+SONG_PATH :: "song.midiseq"
 
 
 // Parse the DSL source, install it as the sequencer's root, and ready it
@@ -52,7 +30,13 @@ main :: proc() {
 	sequencer.sink = midi_sink(&midi)
 	sequencer.tempo = 120
 
-	if !load_song(&sequencer, SOURCE) do return
+	source_bytes, read_err := os.read_entire_file(SONG_PATH, context.allocator)
+	if read_err != nil {
+		fmt.eprintfln("could not read %s: %v", SONG_PATH, read_err)
+		return
+	}
+	defer delete(source_bytes)
+	if !load_song(&sequencer, string(source_bytes)) do return
 
 	rl.InitWindow(900, 760, "midiseq")
 	defer rl.CloseWindow()
