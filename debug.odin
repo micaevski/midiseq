@@ -30,7 +30,7 @@ debug_scroll: f32
 debug_draw_source :: proc(sequencer: ^seq.Sequencer, area: rl.Rectangle) {
 	rl.DrawRectangleRec(area, rl.Color{14, 14, 20, 255})
 
-	count := i32(sequencer.source_pool.count)
+	count := i32(len(sequencer.source))
 	if count <= 1 do return
 
 	total_h := DBG_TOP_PAD * 2 + f32(count - 1) * DBG_CELL_H
@@ -48,7 +48,7 @@ debug_draw_source :: proc(sequencer: ^seq.Sequencer, area: rl.Rectangle) {
 
 	// Arrows under cells so line bodies don't clip the cell text.
 	for idx: i32 = 1; idx < count; idx += 1 {
-		e := seq.source_get(sequencer, seq.Source_Index(idx))
+		e := seq.source_get(&sequencer.source, seq.Source_Index(idx))
 		from := debug_cell_rect(idx, area)
 		if e.next != seq.NIL_SOURCE {
 			to := debug_cell_rect(i32(e.next), area)
@@ -81,7 +81,7 @@ debug_cell_rect :: proc(idx: i32, area: rl.Rectangle) -> rl.Rectangle {
 
 @(private = "file")
 debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle) {
-	e := seq.source_get(sequencer, seq.Source_Index(idx))
+	e := seq.source_get(&sequencer.source, seq.Source_Index(idx))
 	r := debug_cell_rect(idx, area)
 
 	// Skip work for cells fully scrolled off either edge.

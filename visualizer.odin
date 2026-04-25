@@ -100,7 +100,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 
 	current := sequencer.active_head
 	for current != seq.NIL_RUNTIME {
-		e := seq.runtime_get(sequencer, current)
+		e := seq.runtime_get(&sequencer.runtime_pool, current)
 		next := e.active_next
 		switch k in e.kind {
 		case seq.Runtime_Note:

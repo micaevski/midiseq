@@ -3,7 +3,7 @@ package seq
 import "core:mem"
 
 
-DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Source_Event)
+DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Runtime_Event)
 NAMES_ARENA_BYTES :: 16 * 1024
 
 
@@ -108,20 +108,68 @@ Sink :: struct {
 }
 
 
+// The source-event store is a `[dynamic]Source_Event` whose capacity is
+// preset at make-time and never exceeded — `source_alloc` enforces that
+// by hand. Index 0 is reserved as the nil sentinel and is held by an
+// always-present zero element at slot 0.
+
+make_source_store :: proc(capacity: int) -> [dynamic]Source_Event {
+	return make([dynamic]Source_Event, 1, capacity) // len=1 reserves slot 0
+}
+
+// Rewind to length 1 without freeing the backing buffer. Slot 0 stays
+// zero (the nil sentinel); higher slots are treated as garbage and
+// overwritten by the next allocations.
+source_store_reset :: proc(s: ^[dynamic]Source_Event) {
+	resize(s, 1)
+	s[0] = {}
+}
+
+source_alloc :: proc(s: ^[dynamic]Source_Event) -> Source_Index {
+	if len(s) >= cap(s) do return NIL_SOURCE
+	append(s, Source_Event{})
+	return Source_Index(len(s) - 1)
+}
+
+source_get :: proc(s: ^[dynamic]Source_Event, index: Source_Index) -> ^Source_Event {
+	return &s[index]
+}
+
+
 // `lookup` maps a source-pool index to a human-readable name from the
 // DSL: top-level definitions get their own name, references get the
 // name of their target (so `BASS(0)` is labeled "BASS"). Strings are
-// cloned into `arena` during parse so they outlive the parser's own
-// arena.
+// cloned into `arena` during parse.
 Names :: struct {
 	lookup:    map[Source_Index]string,
 	arena:     mem.Arena,
 	arena_buf: []byte,
 }
 
+make_names :: proc() -> Names {
+	n := Names{}
+	n.arena_buf = make([]byte, NAMES_ARENA_BYTES)
+	mem.arena_init(&n.arena, n.arena_buf)
+	n.lookup = make(map[Source_Index]string, 32)
+	return n
+}
 
-// The Sequencer holds two pools:
-//   source_pool  - authored source events, written by the parser.
+destroy_names :: proc(n: ^Names) {
+	delete(n.lookup)
+	delete(n.arena_buf)
+	n^ = {}
+}
+
+// Wipe the map and rewind the arena so the next parse starts fresh in
+// the same backing storage.
+names_reset :: proc(n: ^Names) {
+	clear(&n.lookup)
+	mem.arena_free_all(&n.arena)
+}
+
+
+// The Sequencer owns:
+//   source       - the live source-event buffer (bump allocator).
 //   runtime_pool - transient instances created during playback.
 // `source_root` is the authored root. `active_head`/`active_tail` form
 // the single flat chain of all live runtime events (notes and
@@ -133,8 +181,8 @@ Sequencer :: struct {
 	source_root:  Source_Index,
 	active_head:  Runtime_Index,
 	active_tail:  Runtime_Index,
-	source_pool:  Pool(Source_Event),
-	runtime_pool: Pool(Runtime_Event),
+	source:       [dynamic]Source_Event,
+	runtime_pool: Runtime_Pool,
 	sink:         Sink,
 	rng_state:    u32, // xorshift32; set via `SEED = N` in source
 	names:        Names,
@@ -145,69 +193,42 @@ make_sequencer :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Sequencer {
 	source_capacity := pool_bytes / size_of(Source_Event)
 	runtime_capacity := pool_bytes / size_of(Runtime_Event)
 	sequencer := Sequencer{}
-	pool_init(&sequencer.source_pool, source_capacity)
-	pool_init(&sequencer.runtime_pool, runtime_capacity)
-
-	sequencer.names.arena_buf = make([]byte, NAMES_ARENA_BYTES)
-	mem.arena_init(&sequencer.names.arena, sequencer.names.arena_buf)
-	sequencer.names.lookup = make(map[Source_Index]string, 32)
+	sequencer.source = make_source_store(source_capacity)
+	runtime_pool_init(&sequencer.runtime_pool, runtime_capacity)
+	sequencer.names = make_names()
 	return sequencer
 }
 
 destroy_sequencer :: proc(sequencer: ^Sequencer) {
-	pool_destroy(&sequencer.source_pool)
-	pool_destroy(&sequencer.runtime_pool)
-	delete(sequencer.names.lookup)
-	delete(sequencer.names.arena_buf)
-}
-
-
-// Source-pool wrappers (parser side).
-source_alloc :: proc(sequencer: ^Sequencer) -> Source_Index {
-	return Source_Index(pool_alloc(&sequencer.source_pool))
-}
-
-source_get :: proc(sequencer: ^Sequencer, index: Source_Index) -> ^Source_Event {
-	return pool_get(&sequencer.source_pool, u32(index))
-}
-
-// Runtime-pool wrappers (playback side).
-runtime_alloc :: proc(sequencer: ^Sequencer) -> Runtime_Index {
-	return Runtime_Index(pool_alloc(&sequencer.runtime_pool))
-}
-
-runtime_free :: proc(sequencer: ^Sequencer, index: Runtime_Index) {
-	pool_free(&sequencer.runtime_pool, u32(index))
-}
-
-runtime_get :: proc(sequencer: ^Sequencer, index: Runtime_Index) -> ^Runtime_Event {
-	return pool_get(&sequencer.runtime_pool, u32(index))
+	delete(sequencer.source)
+	runtime_pool_destroy(&sequencer.runtime_pool)
+	destroy_names(&sequencer.names)
 }
 
 
 // Insert `event` into the child list of the Source_Timeline stored at
-// `parent`, keeping the list sorted by beat. Ties go after existing
-// events at the same beat (stable insertion). Returns the new event's
-// index, or NIL_SOURCE if the pool is full. Panics if `parent` is not
-// a Source_Timeline.
+// `parent` in `s`, keeping the list sorted by beat. Ties go after
+// existing events at the same beat (stable insertion). Returns the new
+// event's index, or NIL_SOURCE if the storage is full. Panics if
+// `parent` is not a Source_Timeline.
 add_source_event :: proc(
-	sequencer: ^Sequencer,
+	s: ^[dynamic]Source_Event,
 	parent: Source_Index,
 	event: Source_Event,
 ) -> Source_Index {
-	new_idx := source_alloc(sequencer)
+	new_idx := source_alloc(s)
 	if new_idx == NIL_SOURCE do return NIL_SOURCE
 
-	new_event := source_get(sequencer, new_idx)
+	new_event := source_get(s, new_idx)
 	new_event^ = event
 
-	parent_event := source_get(sequencer, parent)
+	parent_event := source_get(s, parent)
 	timeline := &parent_event.kind.(Source_Timeline)
 
 	current_idx := timeline.first
 	prev_idx := NIL_SOURCE
 	for current_idx != NIL_SOURCE {
-		current_event := source_get(sequencer, current_idx)
+		current_event := source_get(s, current_idx)
 		if current_event.beat > event.beat do break
 		prev_idx = current_idx
 		current_idx = current_event.next
@@ -218,10 +239,10 @@ add_source_event :: proc(
 	if prev_idx == NIL_SOURCE {
 		timeline.first = new_idx
 	} else {
-		source_get(sequencer, prev_idx).next = new_idx
+		source_get(s, prev_idx).next = new_idx
 	}
 	if current_idx != NIL_SOURCE {
-		source_get(sequencer, current_idx).prev = new_idx
+		source_get(s, current_idx).prev = new_idx
 	}
 
 	return new_idx
@@ -240,11 +261,11 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.runtime_pool.count = 1
 	sequencer.runtime_pool.free_head = 0
 
-	source := source_get(sequencer, sequencer.source_root)
+	source := source_get(&sequencer.source, sequencer.source_root)
 	source_timeline := source.kind.(Source_Timeline)
 
-	root_idx := runtime_alloc(sequencer)
-	root_event := runtime_get(sequencer, root_idx)
+	root_idx := runtime_alloc(&sequencer.runtime_pool)
+	root_event := runtime_get(&sequencer.runtime_pool, root_idx)
 	root_event.beat = 0
 	root_event.kind = Runtime_Timeline {
 		cursor        = source_timeline.first,
@@ -276,7 +297,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	prev := NIL_RUNTIME
 	cur := sequencer.active_head
 	for cur != NIL_RUNTIME {
-		event := runtime_get(sequencer, cur)
+		event := runtime_get(&sequencer.runtime_pool, cur)
 
 		finished: bool
 		switch k in event.kind {
@@ -298,7 +319,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 				if sequencer.active_tail == NIL_RUNTIME {
 					sequencer.active_head = spawn_head
 				} else {
-					runtime_get(sequencer, sequencer.active_tail).active_next = spawn_head
+					runtime_get(&sequencer.runtime_pool, sequencer.active_tail).active_next = spawn_head
 				}
 				sequencer.active_tail = spawn_tail
 			}
@@ -313,12 +334,12 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 			if prev == NIL_RUNTIME {
 				sequencer.active_head = next
 			} else {
-				runtime_get(sequencer, prev).active_next = next
+				runtime_get(&sequencer.runtime_pool, prev).active_next = next
 			}
 			if cur == sequencer.active_tail {
 				sequencer.active_tail = prev
 			}
-			runtime_free(sequencer, cur)
+			runtime_free(&sequencer.runtime_pool, cur)
 		} else {
 			prev = cur
 		}
@@ -350,7 +371,7 @@ sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
 // `parent_source_idx`).
 @(private)
 channel_of :: proc(sequencer: ^Sequencer, src: Source_Index) -> i32 {
-	return source_get(sequencer, src).kind.(Source_Timeline).channel
+	return source_get(&sequencer.source, src).kind.(Source_Timeline).channel
 }
 
 // xorshift32. Remaps 0 to a fixed non-zero so an un-seeded sequencer
@@ -384,14 +405,14 @@ play_timeline :: proc(
 	spawn_head: Runtime_Index,
 	spawn_tail: Runtime_Index,
 ) {
-	timeline_event := runtime_get(sequencer, timeline_event_idx)
+	timeline_event := runtime_get(&sequencer.runtime_pool, timeline_event_idx)
 	timeline := &timeline_event.kind.(Runtime_Timeline)
 
 	spawn_head = NIL_RUNTIME
 	spawn_tail = NIL_RUNTIME
 
 	for timeline.cursor != NIL_SOURCE {
-		cursor_event := source_get(sequencer, timeline.cursor)
+		cursor_event := source_get(&sequencer.source, timeline.cursor)
 		if cursor_event.beat > local_time do break
 
 		// Evaluate chance.
@@ -403,9 +424,9 @@ play_timeline :: proc(
 			}
 		}
 
-		new_idx := runtime_alloc(sequencer)
+		new_idx := runtime_alloc(&sequencer.runtime_pool)
 		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
-		runtime_event := runtime_get(sequencer, new_idx)
+		runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 		// Translate the source-domain beat into root-time. For the root
 		// timeline (rate=1, start=0) this is identity.
 		runtime_event.beat = cursor_event.beat / timeline.rate + timeline_event.beat
@@ -437,7 +458,7 @@ play_timeline :: proc(
 		if spawn_tail == NIL_RUNTIME {
 			spawn_head = new_idx
 		} else {
-			runtime_get(sequencer, spawn_tail).active_next = new_idx
+			runtime_get(&sequencer.runtime_pool, spawn_tail).active_next = new_idx
 		}
 		spawn_tail = new_idx
 

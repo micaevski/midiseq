@@ -15,7 +15,7 @@ SONG = [
     BASS(3)
     BASS(5)
     CHORD(0)
-    CHORD(2 trans=3)
+    CHORD(2 trans=2)
     CHORD(3.5 trans=5)
     SONG(8)
 ]

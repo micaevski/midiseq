@@ -9,12 +9,31 @@ import rl "vendor:raylib"
 SONG_PATH :: "song.midiseq"
 
 
-// Parse the DSL source, install it as the sequencer's root, and ready it
-// for playback.
-load_song :: proc(sequencer: ^seq.Sequencer, source: string) -> bool {
-	root, ok := seq.parse_source(sequencer, source)
+// Parse `path` into `parser`, then on success swap the parser's
+// source/names buffers into the sequencer, install the new root, and
+// restart playback. Sequencer is left untouched on parse or read
+// failure.
+reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, midi: ^Midi_Out, path: string) -> bool {
+	bytes, err := os.read_entire_file(path, context.allocator)
+	if err != nil {
+		fmt.eprintfln("could not read %s: %v", path, err)
+		return false
+	}
+	defer delete(bytes)
+
+	new_root, ok := seq.parse_source(parser, string(bytes))
 	if !ok do return false
-	sequencer.source_root = root
+
+	midi_all_notes_off(midi)
+
+	// Ping-pong: parser ↔ sequencer. The parser ends up holding what
+	// the sequencer had; that buffer becomes scratch for the next
+	// parse and gets reset at the top of `parse_source`.
+	parser.source, sequencer.source = sequencer.source, parser.source
+	parser.names, sequencer.names = sequencer.names, parser.names
+
+	sequencer.source_root = new_root
+	sequencer.rng_state = parser.rng_state
 	seq.start_sequencer(sequencer)
 	return true
 }
@@ -30,13 +49,13 @@ main :: proc() {
 	sequencer.sink = midi_sink(&midi)
 	sequencer.tempo = 120
 
-	source_bytes, read_err := os.read_entire_file(SONG_PATH, context.allocator)
-	if read_err != nil {
-		fmt.eprintfln("could not read %s: %v", SONG_PATH, read_err)
-		return
-	}
-	defer delete(source_bytes)
-	if !load_song(&sequencer, string(source_bytes)) do return
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+
+	if !reload_song(&sequencer, &parser, &midi, SONG_PATH) do return
+
+	watcher := File_Watcher{path = SONG_PATH}
+	file_watcher_poll(&watcher) // prime: first poll always returns true
 
 	rl.InitWindow(900, 760, "midiseq")
 	defer rl.CloseWindow()
@@ -54,6 +73,10 @@ main :: proc() {
 	for !rl.WindowShouldClose() {
 		dt := rl.GetFrameTime()
 		if rl.IsKeyPressed(.TAB) do show_debug = !show_debug
+
+		if file_watcher_poll(&watcher) {
+			reload_song(&sequencer, &parser, &midi, SONG_PATH)
+		}
 
 		if playing && !seq.sequencer_finished(&sequencer) {
 			seq.sequencer_tick(&sequencer, dt)

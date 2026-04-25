@@ -6,51 +6,91 @@ import "core:strconv"
 import "core:strings"
 
 
+// Parser owns the buffers it parses into. Live and parser buffers are
+// ping-ponged at the call site: on a successful reparse the caller
+// swaps `parser.source` ↔ `sequencer.source` and `parser.names` ↔
+// `sequencer.names`, so neither side ever allocates fresh storage per
+// reparse. On failure, nothing swaps — the parser's partially-written
+// scratch is overwritten on the next call via the bump-pointer reset
+// in `parse_source`.
+//
+// `rng_state` is filled from a `SEED = N` directive (if present) and
+// is also intended to be transferred to the sequencer on a successful
+// swap.
+//
+// The remaining fields (`src`, `pos`, `line`, `col`, `symbols`) are
+// transient parse-time state and get re-initialized each call.
 Parser :: struct {
-	src:     string,
-	pos:     int,
-	line:    int,
-	col:     int,
-	symbols: map[string]Source_Index,
+	source:    [dynamic]Source_Event,
+	names:     Names,
+	rng_state: u32,
+
+	src:       string,
+	pos:       int,
+	line:      int,
+	col:       int,
+	symbols:   map[string]Source_Index,
 }
 
 
-// Parse `src` as a sequence of top-level `IDENT = [...]` timeline
-// definitions. References inside a list must resolve to a timeline
-// that has already been defined earlier in the source. The last
-// definition becomes the root.
-parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Source_Index, ok: bool) {
+make_parser :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Parser {
+	capacity := pool_bytes / size_of(Source_Event)
+	p := Parser{}
+	p.source = make_source_store(capacity)
+	p.names = make_names()
+	return p
+}
+
+destroy_parser :: proc(p: ^Parser) {
+	delete(p.source)
+	destroy_names(&p.names)
+	p^ = {}
+}
+
+
+// Parse `src` into the parser's own buffers. On success, the caller
+// swaps `parser.source`/`parser.names` into the live sequencer and
+// uses the returned root index. References inside a list must resolve
+// to a timeline that has already been defined earlier in the source.
+// The last definition becomes the root.
+parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
+	// Wipe any leftovers from a previous parse (or from buffers we
+	// just received via swap on a previous successful reparse).
+	source_store_reset(&parser.source)
+	names_reset(&parser.names)
+	parser.rng_state = 0
+
+	parser.src = src
+	parser.pos = 0
+	parser.line = 1
+	parser.col = 1
+
+	// `symbols` lives just for this call. Use a temporary arena so the
+	// map's bookkeeping vanishes when we return.
 	backing := make([]byte, 256 * 1024)
 	defer delete(backing)
 
 	arena: mem.Arena
 	mem.arena_init(&arena, backing)
 	parse_alloc := mem.arena_allocator(&arena)
-
-	parser := Parser {
-		src     = src,
-		line    = 1,
-		col     = 1,
-		symbols = make(map[string]Source_Index, 16, parse_alloc),
-	}
+	parser.symbols = make(map[string]Source_Index, 16, parse_alloc)
 
 	// Pass 1: discover every top-level `IDENT = [...]` and reserve a
-	// Timeline event for it in the pool. Bodies are skipped by
-	// balancing brackets.
-	if !pass_1(sequencer, &parser) do return NIL_SOURCE, false
+	// Timeline event for it. Bodies are skipped by balancing brackets.
+	if !pass_1(parser) do return NIL_SOURCE, false
 
 	// Pass 2: parse each body and populate its Timeline. References
 	// stash the target's index in their `first` field (unresolved).
 	parser.pos = 0
 	parser.line = 1
 	parser.col = 1
-	root = pass_2(sequencer, &parser)
+	root = pass_2(parser)
 	if root == NIL_SOURCE do return NIL_SOURCE, false
 
 	// Pass 3: every top-level body is populated now, so we can rewrite
 	// each reference's stashed target-index into the target's actual
 	// children chain head.
-	resolve_references(sequencer, &parser)
+	resolve_references(parser)
 
 	return root, true
 }
@@ -61,21 +101,21 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Source_Index,
 // the target's event index. Replace it with the target's children chain
 // head.
 @(private)
-resolve_references :: proc(sequencer: ^Sequencer, p: ^Parser) {
+resolve_references :: proc(p: ^Parser) {
 	for _, top_index in p.symbols {
-		top_event := source_get(sequencer, top_index)
+		top_event := source_get(&p.source, top_index)
 		top_timeline, ok := top_event.kind.(Source_Timeline)
 		if !ok do continue
 
 		child_index := top_timeline.first
 		for child_index != NIL_SOURCE {
-			child := source_get(sequencer, child_index)
+			child := source_get(&p.source, child_index)
 			next := child.next
 			if _, is_timeline := child.kind.(Source_Timeline); is_timeline {
 				ref_timeline := &child.kind.(Source_Timeline)
 				target := ref_timeline.first
 				ref_timeline.first =
-					source_get(sequencer, target).kind.(Source_Timeline).first
+					source_get(&p.source, target).kind.(Source_Timeline).first
 			}
 			child_index = next
 		}
@@ -84,7 +124,7 @@ resolve_references :: proc(sequencer: ^Sequencer, p: ^Parser) {
 
 
 @(private)
-pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
+pass_1 :: proc(p: ^Parser) -> bool {
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
@@ -100,16 +140,16 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 		if name == "SEED" {
 			n, n_ok := parse_number(p)
 			if !n_ok {parse_error(p, "expected SEED value"); return false}
-			sequencer.rng_state = u32(n)
+			p.rng_state = u32(n)
 			continue
 		}
 
-		idx := source_alloc(sequencer)
+		idx := source_alloc(&p.source)
 		if idx == NIL_SOURCE {
-			parse_error(p, "event pool full")
+			parse_error(p, "source storage full")
 			return false
 		}
-		top_event := source_get(sequencer, idx)
+		top_event := source_get(&p.source, idx)
 		top_event.chance = 100
 		top_event.kind = Source_Timeline{rate = 1}
 
@@ -122,7 +162,7 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 
 
 @(private)
-pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Source_Index {
+pass_2 :: proc(p: ^Parser) -> Source_Index {
 	last := NIL_SOURCE
 	for {
 		skip_ws(p)
@@ -141,12 +181,10 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Source_Index {
 		idx := p.symbols[name]
 		// Names from p.src are slices into the caller-owned source
 		// string and disappear once parsing is done; clone into the
-		// sequencer's names arena so they outlive parse_source.
-		sequencer.names.lookup[idx], _ = strings.clone(
-			name,
-			mem.arena_allocator(&sequencer.names.arena),
-		)
-		if !parse_list_into(p, sequencer, idx) do return NIL_SOURCE
+		// parser's names arena so they survive the swap into the
+		// sequencer.
+		p.names.lookup[idx], _ = strings.clone(name, mem.arena_allocator(&p.names.arena))
+		if !parse_list_into(p, idx) do return NIL_SOURCE
 
 		last = idx
 	}
@@ -155,7 +193,7 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Source_Index {
 
 
 @(private)
-parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -> bool {
+parse_list_into :: proc(p: ^Parser, parent: Source_Index) -> bool {
 	if !expect(p, '[') do return false
 
 	for {
@@ -169,7 +207,7 @@ parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index)
 			p.col += 1
 			return true
 		}
-		if !parse_element(p, sequencer, parent) do return false
+		if !parse_element(p, parent) do return false
 	}
 }
 
@@ -179,14 +217,14 @@ parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index)
 //   NAME( TIME )
 // Commas between tokens are optional (treated as whitespace).
 @(private)
-parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -> bool {
+parse_element :: proc(p: ^Parser, parent: Source_Index) -> bool {
 	name, ok := parse_ident(p)
 	if !ok {
 		parse_error(p, "expected 'note' or a timeline name")
 		return false
 	}
 
-	if name == "note" do return parse_note_call(p, sequencer, parent)
+	if name == "note" do return parse_note_call(p, parent)
 
 	target, exists := p.symbols[name]
 	if !exists {
@@ -237,7 +275,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -
 	// target's actual children chain head by resolve_references after
 	// every top-level body has been parsed.
 	ref_idx := add_source_event(
-		sequencer,
+		&p.source,
 		parent,
 		Source_Event {
 			beat = beat,
@@ -248,9 +286,9 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -
 	if ref_idx != NIL_SOURCE {
 		// Refs don't have a name of their own; record the target's
 		// name so the debug view can label e.g. `BASS(0)` as "BASS".
-		sequencer.names.lookup[ref_idx], _ = strings.clone(
+		p.names.lookup[ref_idx], _ = strings.clone(
 			name,
-			mem.arena_allocator(&sequencer.names.arena),
+			mem.arena_allocator(&p.names.arena),
 		)
 	}
 	return true
@@ -263,7 +301,7 @@ NOTE_DEFAULT_CHANCE :: 100
 
 // note( TIME PITCH [vel=V] [dur=D] [chance=C] )
 @(private)
-parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -> bool {
+parse_note_call :: proc(p: ^Parser, parent: Source_Index) -> bool {
 	if !expect(p, '(') do return false
 
 	beat, ok_b := parse_number(p)
@@ -309,7 +347,7 @@ parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index)
 	if !expect(p, ')') do return false
 
 	add_source_event(
-		sequencer,
+		&p.source,
 		parent,
 		Source_Event {
 			beat = beat,
