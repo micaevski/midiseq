@@ -10,7 +10,7 @@ Parser :: struct {
 	pos:     int,
 	line:    int,
 	col:     int,
-	symbols: map[string]Template_Index,
+	symbols: map[string]Source_Index,
 }
 
 
@@ -18,7 +18,7 @@ Parser :: struct {
 // definitions. References inside a list must resolve to a timeline
 // that has already been defined earlier in the source. The last
 // definition becomes the root.
-parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Template_Index, ok: bool) {
+parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Source_Index, ok: bool) {
 	backing := make([]byte, 256 * 1024)
 	defer delete(backing)
 
@@ -30,13 +30,13 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Template_Inde
 		src     = src,
 		line    = 1,
 		col     = 1,
-		symbols = make(map[string]Template_Index, 16, parse_alloc),
+		symbols = make(map[string]Source_Index, 16, parse_alloc),
 	}
 
 	// Pass 1: discover every top-level `IDENT = [...]` and reserve a
 	// Timeline event for it in the pool. Bodies are skipped by
 	// balancing brackets.
-	if !pass_1(sequencer, &parser) do return NIL_TEMPLATE, false
+	if !pass_1(sequencer, &parser) do return NIL_SOURCE, false
 
 	// Pass 2: parse each body and populate its Timeline. References
 	// stash the target's index in their `first` field (unresolved).
@@ -44,7 +44,7 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Template_Inde
 	parser.line = 1
 	parser.col = 1
 	root = pass_2(sequencer, &parser)
-	if root == NIL_TEMPLATE do return NIL_TEMPLATE, false
+	if root == NIL_SOURCE do return NIL_SOURCE, false
 
 	// Pass 3: every top-level body is populated now, so we can rewrite
 	// each reference's stashed target-index into the target's actual
@@ -61,18 +61,18 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Template_Inde
 @(private)
 resolve_references :: proc(sequencer: ^Sequencer, p: ^Parser) {
 	for _, top_index in p.symbols {
-		top_event := event_get(sequencer, top_index)
+		top_event := source_get(sequencer, top_index)
 		top_timeline, ok := top_event.kind.(Timeline)
 		if !ok do continue
 
 		child_index := top_timeline.first
-		for child_index != NIL_TEMPLATE {
-			child := event_get(sequencer, child_index)
+		for child_index != NIL_SOURCE {
+			child := source_get(sequencer, child_index)
 			next := child.next
 			if _, is_timeline := child.kind.(Timeline); is_timeline {
 				ref_timeline := &child.kind.(Timeline)
 				target := ref_timeline.first
-				ref_timeline.first = event_get(sequencer, target).kind.(Timeline).first
+				ref_timeline.first = source_get(sequencer, target).kind.(Timeline).first
 			}
 			child_index = next
 		}
@@ -101,12 +101,12 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 			continue
 		}
 
-		idx := event_alloc(sequencer)
-		if idx == NIL_TEMPLATE {
+		idx := source_alloc(sequencer)
+		if idx == NIL_SOURCE {
 			parse_error(p, "event pool full")
 			return false
 		}
-		top_event := event_get(sequencer, idx)
+		top_event := source_get(sequencer, idx)
 		top_event.chance = 100
 		top_event.kind = Timeline{rate = 1}
 
@@ -119,15 +119,15 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 
 
 @(private)
-pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Template_Index {
-	last := NIL_TEMPLATE
+pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Source_Index {
+	last := NIL_SOURCE
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
 
 		name, ok := parse_ident(p)
-		if !ok do return NIL_TEMPLATE
-		if !expect(p, '=') do return NIL_TEMPLATE
+		if !ok do return NIL_SOURCE
+		if !expect(p, '=') do return NIL_SOURCE
 
 		// SEED was consumed in pass_1; skip over its value here.
 		if name == "SEED" {
@@ -136,7 +136,7 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Template_Index {
 		}
 
 		idx := p.symbols[name]
-		if !parse_list_into(p, sequencer, idx) do return NIL_TEMPLATE
+		if !parse_list_into(p, sequencer, idx) do return NIL_SOURCE
 
 		last = idx
 	}
@@ -145,7 +145,7 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Template_Index {
 
 
 @(private)
-parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
+parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -> bool {
 	if !expect(p, '[') do return false
 
 	for {
@@ -169,7 +169,7 @@ parse_list_into :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Inde
 //   NAME( TIME )
 // Commas between tokens are optional (treated as whitespace).
 @(private)
-parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
+parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -> bool {
 	name, ok := parse_ident(p)
 	if !ok {
 		parse_error(p, "expected 'note' or a timeline name")
@@ -245,7 +245,7 @@ NOTE_DEFAULT_CHANCE :: 100
 
 // note( TIME PITCH [vel=V] [dur=D] [chance=C] )
 @(private)
-parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Template_Index) -> bool {
+parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -> bool {
 	if !expect(p, '(') do return false
 
 	beat, ok_b := parse_number(p)

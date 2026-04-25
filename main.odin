@@ -57,7 +57,7 @@ SONG = [
 load_song :: proc(sequencer: ^seq.Sequencer, source: string) -> bool {
 	root, ok := seq.parse_source(sequencer, source)
 	if !ok do return false
-	sequencer.root = root
+	sequencer.source_root = root
 	seq.start_sequencer(sequencer)
 	return true
 }
