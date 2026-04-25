@@ -3,7 +3,7 @@ package seq
 import "core:mem"
 
 
-DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Event)
+DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Source_Event)
 NAMES_ARENA_BYTES :: 16 * 1024
 
 
@@ -15,41 +15,74 @@ NIL_SOURCE :: Source_Index(0)
 NIL_RUNTIME :: Runtime_Index(0)
 
 
+// Shared between source and runtime — a Note carries the same data on
+// both sides.
 Note :: struct {
 	number:   i32, // MIDI note, 0..127
 	velocity: i32, // 0..127
 	duration: f32, // in beats; note-off fires at start_beat + duration
 }
 
-// A Timeline has authored fields (first, channel, transposition, rate)
-// and playback fields (cursor, active_head).
-//   first       - head of the authored sibling chain (source pool).
-//   cursor      - authored event to fire next (source pool).
-//   active_head - head of the currently-sounding instances (runtime pool).
-Timeline :: struct {
+
+// ===== Source pool =====
+
+// Source_Timeline is the authored shape of a timeline (top-level def or
+// reference). `first` heads its child sibling chain.
+Source_Timeline :: struct {
 	first:         Source_Index,
+	channel:       i32,
+	transposition: i32, // semitones
+	rate:          f32, // time-scale multiplier
+}
+
+Source_Kind :: union {
+	Note,
+	Source_Timeline,
+}
+
+// Source_Event lives in the source pool and is written by the parser.
+// `prev`/`next` form the sibling chain inside a parent timeline's
+// children list.
+Source_Event :: struct {
+	beat:   f32,
+	chance: i32, // 0..100; probability of firing. 100 = always.
+	kind:   Source_Kind,
+	prev:   Source_Index,
+	next:   Source_Index,
+}
+
+
+// ===== Runtime pool =====
+
+// Runtime_Timeline is a live instance of a Source_Timeline.
+//
+//   cursor      — position in the *source* child chain we're firing from.
+//                 Walks `next` links in the source pool; advances during
+//                 play and stops at NIL_SOURCE.
+//   active_head — head of currently-sounding child runtime instances.
+//   source_idx  — the source ref event this runtime was cloned from.
+//                 Stable for the life of the instance — used to look up
+//                 the channel (`source_get(s, source_idx).kind`) and the
+//                 ref's name in `Sequencer.names`.
+//   transposition / rate — already accumulated from parent at clone time.
+Runtime_Timeline :: struct {
 	cursor:        Source_Index,
 	active_head:   Runtime_Index,
-	channel:       i32,
-	transposition: i32, // semitones; accumulates additively from parent to child
-	rate:          f32, // time-scale multiplier; accumulates multiplicatively
+	source_idx:    Source_Index,
+	transposition: i32,
+	rate:          f32,
 }
 
-Event_Kind :: union {
+Runtime_Kind :: union {
 	Note,
-	Timeline,
+	Runtime_Timeline,
 }
 
-// An Event struct is shared by both pools, but `prev`/`next` are only
-// meaningful for source events (sibling chain) and `active_next` is
-// only meaningful for runtime events (active chain). The other fields
-// stay at their nil sentinels when unused.
-Event :: struct {
+// Runtime_Event lives in the runtime pool and is created during playback.
+// `active_next` links into its parent timeline's active chain.
+Runtime_Event :: struct {
 	beat:        f32,
-	chance:      i32, // 0..100; probability of firing. 100 = always.
-	kind:        Event_Kind,
-	prev:        Source_Index,
-	next:        Source_Index,
+	kind:        Runtime_Kind,
 	active_next: Runtime_Index,
 }
 
@@ -87,8 +120,8 @@ Sequencer :: struct {
 	beat:         f32,
 	source_root:  Source_Index,
 	runtime_root: Runtime_Index,
-	source_pool:  Pool(Event),
-	runtime_pool: Pool(Event),
+	source_pool:  Pool(Source_Event),
+	runtime_pool: Pool(Runtime_Event),
 	sink:         Sink,
 	rng_state:    u32, // xorshift32; set via `SEED = N` in source
 	names:        Names,
@@ -96,10 +129,11 @@ Sequencer :: struct {
 
 
 make_sequencer :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Sequencer {
-	capacity := pool_bytes / size_of(Event)
+	source_capacity := pool_bytes / size_of(Source_Event)
+	runtime_capacity := pool_bytes / size_of(Runtime_Event)
 	sequencer := Sequencer{}
-	pool_init(&sequencer.source_pool, capacity)
-	pool_init(&sequencer.runtime_pool, capacity)
+	pool_init(&sequencer.source_pool, source_capacity)
+	pool_init(&sequencer.runtime_pool, runtime_capacity)
 
 	sequencer.names.arena_buf = make([]byte, NAMES_ARENA_BYTES)
 	mem.arena_init(&sequencer.names.arena, sequencer.names.arena_buf)
@@ -124,7 +158,7 @@ source_free :: proc(sequencer: ^Sequencer, index: Source_Index) {
 	pool_free(&sequencer.source_pool, u32(index))
 }
 
-source_get :: proc(sequencer: ^Sequencer, index: Source_Index) -> ^Event {
+source_get :: proc(sequencer: ^Sequencer, index: Source_Index) -> ^Source_Event {
 	return pool_get(&sequencer.source_pool, u32(index))
 }
 
@@ -137,24 +171,29 @@ runtime_free :: proc(sequencer: ^Sequencer, index: Runtime_Index) {
 	pool_free(&sequencer.runtime_pool, u32(index))
 }
 
-runtime_get :: proc(sequencer: ^Sequencer, index: Runtime_Index) -> ^Event {
+runtime_get :: proc(sequencer: ^Sequencer, index: Runtime_Index) -> ^Runtime_Event {
 	return pool_get(&sequencer.runtime_pool, u32(index))
 }
 
 
-// Insert `event` into the child list of the Timeline stored at `parent`,
-// keeping the list sorted by beat. Ties go after existing events at the
-// same beat (stable insertion). Returns the new event's index, or
-// NIL_SOURCE if the pool is full. Panics if `parent` is not a Timeline.
-add_event :: proc(sequencer: ^Sequencer, parent: Source_Index, event: Event) -> Source_Index {
+// Insert `event` into the child list of the Source_Timeline stored at
+// `parent`, keeping the list sorted by beat. Ties go after existing
+// events at the same beat (stable insertion). Returns the new event's
+// index, or NIL_SOURCE if the pool is full. Panics if `parent` is not
+// a Source_Timeline.
+add_source_event :: proc(
+	sequencer: ^Sequencer,
+	parent: Source_Index,
+	event: Source_Event,
+) -> Source_Index {
 	new_idx := source_alloc(sequencer)
 	if new_idx == NIL_SOURCE do return NIL_SOURCE
 
-	runtime_event := source_get(sequencer, new_idx)
-	runtime_event^ = event
+	new_event := source_get(sequencer, new_idx)
+	new_event^ = event
 
 	parent_event := source_get(sequencer, parent)
-	timeline := &parent_event.kind.(Timeline)
+	timeline := &parent_event.kind.(Source_Timeline)
 
 	current_idx := timeline.first
 	prev_idx := NIL_SOURCE
@@ -165,8 +204,8 @@ add_event :: proc(sequencer: ^Sequencer, parent: Source_Index, event: Event) -> 
 		current_idx = current_event.next
 	}
 
-	runtime_event.prev = prev_idx
-	runtime_event.next = current_idx
+	new_event.prev = prev_idx
+	new_event.next = current_idx
 	if prev_idx == NIL_SOURCE {
 		timeline.first = new_idx
 	} else {
@@ -193,16 +232,15 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 
 	// Clone the authored root as a fresh runtime instance.
 	source := source_get(sequencer, sequencer.source_root)
-	source_timeline := source.kind.(Timeline)
+	source_timeline := source.kind.(Source_Timeline)
 
 	root_idx := runtime_alloc(sequencer)
 	root_event := runtime_get(sequencer, root_idx)
 	root_event.beat = 0
-	root_event.kind = Timeline {
-		first         = source_timeline.first,
+	root_event.kind = Runtime_Timeline {
 		cursor        = source_timeline.first,
 		active_head   = NIL_RUNTIME,
-		channel       = source_timeline.channel,
+		source_idx    = sequencer.source_root,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
 	}
@@ -218,7 +256,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	if spawn_head == NIL_RUNTIME do return
 
 	root_event := runtime_get(sequencer, sequencer.runtime_root)
-	root_timeline := &root_event.kind.(Timeline)
+	root_timeline := &root_event.kind.(Runtime_Timeline)
 
 	tail := spawn_head
 	for {
@@ -233,7 +271,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 // The root instance has nothing pending and nothing sounding.
 sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
 	root := runtime_get(sequencer, sequencer.runtime_root)
-	timeline := root.kind.(Timeline)
+	timeline := root.kind.(Runtime_Timeline)
 	return timeline.cursor == NIL_SOURCE && timeline.active_head == NIL_RUNTIME
 }
 
@@ -248,6 +286,15 @@ sink_note_on :: proc(sink: ^Sink, channel, number, velocity: i32) {
 @(private)
 sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
 	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
+}
+
+// Look up the channel a runtime timeline should emit on by reading the
+// authored channel off its source ref. Channel doesn't accumulate from
+// parent (unlike transposition/rate), so it lives only on the source
+// side.
+@(private)
+runtime_channel :: proc(sequencer: ^Sequencer, t: Runtime_Timeline) -> i32 {
+	return source_get(sequencer, t.source_idx).kind.(Source_Timeline).channel
 }
 
 // xorshift32. Remaps 0 to a fixed non-zero so an un-seeded sequencer
@@ -269,7 +316,6 @@ rand_u32 :: proc(state: ^u32) -> u32 {
 // adopt.
 //
 //   Cursor walks the authored children chain in the source pool.
-
 //   Each fired event is copied into a fresh runtime instance.
 //   Note-instances join this timeline's own active chain; Timeline
 //   instances are returned via the spawn chain (flattens recursion).
@@ -280,7 +326,7 @@ play_timeline :: proc(
 	local_time: f32,
 ) -> Runtime_Index {
 	timeline_event := runtime_get(sequencer, timeline_event_idx)
-	timeline := &timeline_event.kind.(Timeline)
+	timeline := &timeline_event.kind.(Runtime_Timeline)
 
 	spawn_head := NIL_RUNTIME
 
@@ -302,30 +348,30 @@ play_timeline :: proc(
 		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
 		runtime_event := runtime_get(sequencer, new_idx)
 		runtime_event.beat = cursor_event.beat
-		runtime_event.chance = cursor_event.chance
-		runtime_event.kind = cursor_event.kind
 
-		switch k in runtime_event.kind {
+		switch k in cursor_event.kind {
 		case Note:
+			runtime_event.kind = k
 			runtime_event.active_next = timeline.active_head
 			timeline.active_head = new_idx
 			// fire notes
 			sink_note_on(
 				&sequencer.sink,
-				timeline.channel,
+				runtime_channel(sequencer, timeline^),
 				k.number + timeline.transposition,
 				k.velocity,
 			)
-		case Timeline:
-			new_timeline := &runtime_event.kind.(Timeline)
-			new_timeline.cursor = new_timeline.first
-			new_timeline.active_head = NIL_RUNTIME
-
-			// As timelines are recursivly evaluated using the new runtime instances,
-			// we can accumulate these values by setting them on the spawned instances.
-			new_timeline.transposition += timeline.transposition
-			new_timeline.rate *= timeline.rate
-
+		case Source_Timeline:
+			// Build a fresh runtime instance, accumulating
+			// transposition/rate from the parent and remembering the
+			// source ref we cloned from.
+			runtime_event.kind = Runtime_Timeline {
+				cursor        = k.first,
+				active_head   = NIL_RUNTIME,
+				source_idx    = timeline.cursor,
+				transposition = k.transposition + timeline.transposition,
+				rate          = k.rate * timeline.rate,
+			}
 			// runtime timelines get added to the spawn list
 			runtime_event.active_next = spawn_head
 			spawn_head = new_idx
@@ -345,11 +391,15 @@ play_timeline :: proc(
 		switch k in current_event.kind {
 		case Note:
 			if current_event.beat + k.duration <= local_time {
-				sink_note_off(&sequencer.sink, timeline.channel, k.number + timeline.transposition)
+				sink_note_off(
+					&sequencer.sink,
+					runtime_channel(sequencer, timeline^),
+					k.number + timeline.transposition,
+				)
 				finished = true
 			}
-		case Timeline:
-			child := &current_event.kind.(Timeline)
+		case Runtime_Timeline:
+			child := &current_event.kind.(Runtime_Timeline)
 			// recursively play child timelines, accumulating spawns
 			sub_head := play_timeline(
 				sequencer,

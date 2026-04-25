@@ -54,7 +54,7 @@ debug_draw_source :: proc(sequencer: ^seq.Sequencer, area: rl.Rectangle) {
 			to := debug_cell_rect(i32(e.next), area)
 			debug_draw_side_arrow(from, to, SIBLING_COLOR, false, true)
 		}
-		if t, ok := e.kind.(seq.Timeline); ok && t.first != seq.NIL_SOURCE {
+		if t, ok := e.kind.(seq.Source_Timeline); ok && t.first != seq.NIL_SOURCE {
 			to := debug_cell_rect(i32(t.first), area)
 			debug_draw_side_arrow(from, to, FIRST_COLOR, true, false)
 		}
@@ -91,7 +91,7 @@ debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle)
 	rl.DrawRectangleLinesEx(r, 1, rl.Color{90, 90, 110, 255})
 
 	title: cstring = "Note"
-	if _, is_timeline := e.kind.(seq.Timeline); is_timeline {
+	if _, is_timeline := e.kind.(seq.Source_Timeline); is_timeline {
 		if name, has_name := sequencer.names.lookup[seq.Source_Index(idx)]; has_name {
 			title = fmt.ctprintf("%s", name)
 		} else {
@@ -115,7 +115,7 @@ debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle)
 			14,
 			rl.LIGHTGRAY,
 		)
-	case seq.Timeline:
+	case seq.Source_Timeline:
 		ui_draw_text(
 			fmt.ctprintf("trans=%d  rate=%.1f  beat=%.2f", k.transposition, k.rate, e.beat),
 			i32(r.x) + 12,

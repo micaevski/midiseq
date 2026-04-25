@@ -82,7 +82,7 @@ collect_notes :: proc(
 	timeline_idx: seq.Runtime_Index,
 ) {
 	event := seq.runtime_get(sequencer, timeline_idx)
-	timeline := event.kind.(seq.Timeline)
+	timeline := event.kind.(seq.Runtime_Timeline)
 
 	current := timeline.active_head
 	for current != seq.NIL_RUNTIME {
@@ -131,7 +131,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 	// entries — sub-timelines bubble up to it during play. Walk it once:
 	// notes feed the root lane; each Timeline gets its own lane.
 	root := seq.runtime_get(sequencer, sequencer.runtime_root)
-	root_timeline := root.kind.(seq.Timeline)
+	root_timeline := root.kind.(seq.Runtime_Timeline)
 
 	root_lane_i := find_lane(vis, sequencer.runtime_root)
 	vis.lanes[root_lane_i].seen = true
@@ -147,7 +147,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 			ni := find_note(lane, sounding)
 			lane.notes[ni].velocity = k.velocity
 			lane.notes[ni].seen = true
-		case seq.Timeline:
+		case seq.Runtime_Timeline:
 			li := find_lane(vis, current)
 			vis.lanes[li].seen = true
 			collect_notes(sequencer, &vis.lanes[li], current)

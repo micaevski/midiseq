@@ -57,23 +57,25 @@ parse_source :: proc(sequencer: ^Sequencer, src: string) -> (root: Source_Index,
 
 
 // For each top-level timeline, walk its direct children. Any child that
-// is a Timeline is a reference, and its `first` currently holds the
-// target's event index. Replace it with the target's children chain head.
+// is a Source_Timeline is a reference, and its `first` currently holds
+// the target's event index. Replace it with the target's children chain
+// head.
 @(private)
 resolve_references :: proc(sequencer: ^Sequencer, p: ^Parser) {
 	for _, top_index in p.symbols {
 		top_event := source_get(sequencer, top_index)
-		top_timeline, ok := top_event.kind.(Timeline)
+		top_timeline, ok := top_event.kind.(Source_Timeline)
 		if !ok do continue
 
 		child_index := top_timeline.first
 		for child_index != NIL_SOURCE {
 			child := source_get(sequencer, child_index)
 			next := child.next
-			if _, is_timeline := child.kind.(Timeline); is_timeline {
-				ref_timeline := &child.kind.(Timeline)
+			if _, is_timeline := child.kind.(Source_Timeline); is_timeline {
+				ref_timeline := &child.kind.(Source_Timeline)
 				target := ref_timeline.first
-				ref_timeline.first = source_get(sequencer, target).kind.(Timeline).first
+				ref_timeline.first =
+					source_get(sequencer, target).kind.(Source_Timeline).first
 			}
 			child_index = next
 		}
@@ -109,7 +111,7 @@ pass_1 :: proc(sequencer: ^Sequencer, p: ^Parser) -> bool {
 		}
 		top_event := source_get(sequencer, idx)
 		top_event.chance = 100
-		top_event.kind = Timeline{rate = 1}
+		top_event.kind = Source_Timeline{rate = 1}
 
 		p.symbols[name] = idx
 
@@ -234,13 +236,13 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -
 	// Stash the target's index in `first`. It gets rewritten to the
 	// target's actual children chain head by resolve_references after
 	// every top-level body has been parsed.
-	ref_idx := add_event(
+	ref_idx := add_source_event(
 		sequencer,
 		parent,
-		Event {
+		Source_Event {
 			beat = beat,
 			chance = chance,
-			kind = Timeline{first = target, transposition = trans, rate = rate},
+			kind = Source_Timeline{first = target, transposition = trans, rate = rate},
 		},
 	)
 	if ref_idx != NIL_SOURCE {
@@ -306,10 +308,10 @@ parse_note_call :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index)
 	}
 	if !expect(p, ')') do return false
 
-	add_event(
+	add_source_event(
 		sequencer,
 		parent,
-		Event {
+		Source_Event {
 			beat = beat,
 			chance = chance,
 			kind = Note{number = pitch, velocity = vel, duration = dur},
