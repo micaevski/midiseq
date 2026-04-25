@@ -6,49 +6,28 @@ import rl "vendor:raylib"
 
 
 SOURCE :: `
-CHORD_A = [
-    note( 0 C5 vel=85 dur=0.3 )
-    note( 0 E5 vel=85 dur=0.3 )
-    note( 0 G5 vel=85 dur=0.3 )
+
+CHORD = [
+    note( 0 C4 vel=30 )
+    note( 0 E4 vel=30 )
+    note( 0 G4 vel=30 )
 ]
 
-CHORD_B = [
-    note( 0 F5 vel=85 dur=0.3 )
-    note( 0 A5 vel=85 dur=0.3 )
-    note( 0 C6 vel=85 dur=0.3 )
-]
-
-PART_A = [
-    CHORD_A(0)
-    CHORD_A(1)
-    CHORD_A(2)
-    CHORD_A(3)
-    PART_A(2, trans=3)
-]
-
-PART_B = [
-    CHORD_B(0)
-    CHORD_B(1)
-    CHORD_B(2)
-    CHORD_B(3)
-    PART_A(4)
-]
-
-NOTE = [  note( 0 C5 vel=85 dur=0.3 )]
-
-PART = [ 
-    NOTE(0)
-    NOTE(0.5 trans=2)
-    NOTE(1 trans=4)
+BASS = [
+    note( 0   C3 vel=30 )
+    note( 1.5 F3 vel=30 )
+    note( 2.5 A2 vel=30 )
 ]
 
 SONG = [
-    PART(0)
-    PART(4 trans=5 rate=2 chance=50)
-    SONG(6)
+    BASS(0)
+    BASS(3)
+    BASS(5)
+    CHORD(0)
+    CHORD(2 trans=3)
+    CHORD(3.5 trans=5)
+    SONG(8)
 ]
-
-
 `
 
 
@@ -75,15 +54,19 @@ main :: proc() {
 
 	if !load_song(&sequencer, SOURCE) do return
 
-	rl.InitWindow(520, 220, "midiseq")
+	rl.InitWindow(900, 760, "midiseq")
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(120)
+
+	vis: Visualizer
+	defer destroy_visualizer(&vis)
 
 	playing := true
 
 	for !rl.WindowShouldClose() {
+		dt := rl.GetFrameTime()
 		if playing && !seq.sequencer_finished(&sequencer) {
-			seq.sequencer_tick(&sequencer, rl.GetFrameTime())
+			seq.sequencer_tick(&sequencer, dt)
 		}
 
 		rl.BeginDrawing()
@@ -116,6 +99,8 @@ main :: proc() {
 			40,
 			240,
 		)
+
+		draw_active(&vis, &sequencer, rl.Rectangle{20, 160, 860, 580}, dt)
 
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
