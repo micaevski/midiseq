@@ -90,10 +90,16 @@ debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle)
 	rl.DrawRectangleRec(r, rl.Color{32, 32, 44, 255})
 	rl.DrawRectangleLinesEx(r, 1, rl.Color{90, 90, 110, 255})
 
-	kind_label := cstring("Note")
-	if _, ok := e.kind.(seq.Timeline); ok do kind_label = "Timeline"
+	title: cstring = "Note"
+	if _, is_timeline := e.kind.(seq.Timeline); is_timeline {
+		if name, has_name := sequencer.names.lookup[seq.Source_Index(idx)]; has_name {
+			title = fmt.ctprintf("%s", name)
+		} else {
+			title = "Timeline"
+		}
+	}
 	ui_draw_text(
-		fmt.ctprintf("[%d] %s", idx, kind_label),
+		fmt.ctprintf("[%d] %s", idx, title),
 		i32(r.x) + 12,
 		i32(r.y) + 8,
 		16,

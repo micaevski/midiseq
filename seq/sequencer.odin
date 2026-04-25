@@ -1,7 +1,10 @@
 package seq
 
+import "core:mem"
+
 
 DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Event)
+NAMES_ARENA_BYTES :: 16 * 1024
 
 
 // Distinct index types for the two pools. Index 0 is the nil sentinel for
@@ -62,6 +65,18 @@ Sink :: struct {
 }
 
 
+// `lookup` maps a source-pool index to a human-readable name from the
+// DSL: top-level definitions get their own name, references get the
+// name of their target (so `BASS(0)` is labeled "BASS"). Strings are
+// cloned into `arena` during parse so they outlive the parser's own
+// arena.
+Names :: struct {
+	lookup:    map[Source_Index]string,
+	arena:     mem.Arena,
+	arena_buf: []byte,
+}
+
+
 // The Sequencer holds two pools:
 //   source_pool  - authored source events, written by the parser.
 //   runtime_pool - transient instances created during playback.
@@ -76,6 +91,7 @@ Sequencer :: struct {
 	runtime_pool: Pool(Event),
 	sink:         Sink,
 	rng_state:    u32, // xorshift32; set via `SEED = N` in source
+	names:        Names,
 }
 
 
@@ -84,12 +100,18 @@ make_sequencer :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Sequencer {
 	sequencer := Sequencer{}
 	pool_init(&sequencer.source_pool, capacity)
 	pool_init(&sequencer.runtime_pool, capacity)
+
+	sequencer.names.arena_buf = make([]byte, NAMES_ARENA_BYTES)
+	mem.arena_init(&sequencer.names.arena, sequencer.names.arena_buf)
+	sequencer.names.lookup = make(map[Source_Index]string, 32)
 	return sequencer
 }
 
 destroy_sequencer :: proc(sequencer: ^Sequencer) {
 	pool_destroy(&sequencer.source_pool)
 	pool_destroy(&sequencer.runtime_pool)
+	delete(sequencer.names.lookup)
+	delete(sequencer.names.arena_buf)
 }
 
 

@@ -3,6 +3,7 @@ package seq
 import "core:fmt"
 import "core:mem"
 import "core:strconv"
+import "core:strings"
 
 
 Parser :: struct {
@@ -136,6 +137,13 @@ pass_2 :: proc(sequencer: ^Sequencer, p: ^Parser) -> Source_Index {
 		}
 
 		idx := p.symbols[name]
+		// Names from p.src are slices into the caller-owned source
+		// string and disappear once parsing is done; clone into the
+		// sequencer's names arena so they outlive parse_source.
+		sequencer.names.lookup[idx], _ = strings.clone(
+			name,
+			mem.arena_allocator(&sequencer.names.arena),
+		)
 		if !parse_list_into(p, sequencer, idx) do return NIL_SOURCE
 
 		last = idx
@@ -226,7 +234,7 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -
 	// Stash the target's index in `first`. It gets rewritten to the
 	// target's actual children chain head by resolve_references after
 	// every top-level body has been parsed.
-	add_event(
+	ref_idx := add_event(
 		sequencer,
 		parent,
 		Event {
@@ -235,6 +243,14 @@ parse_element :: proc(p: ^Parser, sequencer: ^Sequencer, parent: Source_Index) -
 			kind = Timeline{first = target, transposition = trans, rate = rate},
 		},
 	)
+	if ref_idx != NIL_SOURCE {
+		// Refs don't have a name of their own; record the target's
+		// name so the debug view can label e.g. `BASS(0)` as "BASS".
+		sequencer.names.lookup[ref_idx], _ = strings.clone(
+			name,
+			mem.arena_allocator(&sequencer.names.arena),
+		)
+	}
 	return true
 }
 
