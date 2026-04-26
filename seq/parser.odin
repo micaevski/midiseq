@@ -327,6 +327,11 @@ skip_call_args :: proc(p: ^Parser) -> bool {
 			p.pos += 1
 			p.line += 1
 			p.col = 1
+		case '#':
+			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+				p.pos += 1
+				p.col += 1
+			}
 		case:
 			p.pos += 1
 			p.col += 1
@@ -490,6 +495,11 @@ skip_ws :: proc(p: ^Parser) {
 			p.pos += 1
 			p.line += 1
 			p.col = 1
+		case '#':
+			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+				p.pos += 1
+				p.col += 1
+			}
 		case:
 			return
 		}

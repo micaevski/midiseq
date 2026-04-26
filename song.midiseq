@@ -1,16 +1,16 @@
 BASS:
 note(0 C3 vel=50)
-note(1 F3 vel=30)
-note(2 G3 vel=30)
-note(3 B3 vel=30)
-note(4 D4 vel=30)
+note(1 C3 vel=30)
+BASS(2)
 
-
+FJ: "FJ.mid"
 
 PART:
 BASS(0)
 BASS(2)
 
 SONG:
-"FJ.mid"
-SONG(4)
+FJ(0)
+#FJ(4 trans=-5)
+#FJ(2 trans=-12)
+SONG(64)
