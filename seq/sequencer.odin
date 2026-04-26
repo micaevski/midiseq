@@ -353,14 +353,22 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
-	prev := NIL_RUNTIME
+	previous_index := NIL_RUNTIME
 	current_index := sequencer.active_head
 	for current_index != NIL_RUNTIME {
 		event := runtime_get(&sequencer.runtime_pool, current_index)
 
+		parent_finished := false
+		if event.parent != NIL_RUNTIME {
+			parent_event := runtime_get(&sequencer.runtime_pool, event.parent)
+			parent_timeline := parent_event.kind.(Runtime_Timeline)
+			parent_finished = parent_timeline.cursor == NIL_SOURCE
+		}
+
 		finished: bool
 		switch k in event.kind {
 		case Runtime_Note:
+			if parent_finished do event.parent = NIL_RUNTIME
 			if event.beat + k.duration <= sequencer.beat {
 				if k.channel >= 0 && k.channel < 16 && k.number >= 0 && k.number < 128 {
 					if sequencer.playing_notes[k.channel][k.number] == current_index {
@@ -371,92 +379,48 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 				finished = true
 			}
 		case Runtime_Timeline:
-			sub_local := (sequencer.beat - event.beat) * k.rate
-			spawn_head, spawn_tail := play_timeline(sequencer, current_index, sub_local)
-			if spawn_head != NIL_RUNTIME {
-				if sequencer.active_tail == NIL_RUNTIME {
-					sequencer.active_head = spawn_head
-				} else {
-					runtime_get(&sequencer.runtime_pool, sequencer.active_tail).active_next =
-						spawn_head
+			if parent_finished {
+				(&event.kind.(Runtime_Timeline)).cursor = NIL_SOURCE
+				finished = true
+			} else {
+				sub_local := (sequencer.beat - event.beat) * k.rate
+				spawn_head, spawn_tail := play_timeline(sequencer, current_index, sub_local)
+				if spawn_head != NIL_RUNTIME {
+					if sequencer.active_tail == NIL_RUNTIME {
+						sequencer.active_head = spawn_head
+					} else {
+						runtime_get(&sequencer.runtime_pool, sequencer.active_tail).active_next =
+							spawn_head
+					}
+					sequencer.active_tail = spawn_tail
 				}
-				sequencer.active_tail = spawn_tail
+				finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE
 			}
-			finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE
 		}
 
-		next := event.active_next
-
+		next_index := event.active_next
 		if finished {
-			if prev == NIL_RUNTIME {
-				sequencer.active_head = next
+			if previous_index == NIL_RUNTIME {
+				sequencer.active_head = next_index
 			} else {
-				runtime_get(&sequencer.runtime_pool, prev).active_next = next
+				runtime_get(&sequencer.runtime_pool, previous_index).active_next = next_index
 			}
 			if current_index == sequencer.active_tail {
-				sequencer.active_tail = prev
+				sequencer.active_tail = previous_index
 			}
 			event.active_next = sequencer.finished_head
 			sequencer.finished_head = current_index
 		} else {
-			prev = current_index
+			previous_index = current_index
 		}
-		current_index = next
-	}
-
-	for {
-		changed := false
-		prev = NIL_RUNTIME
-		current_index = sequencer.active_head
-		for current_index != NIL_RUNTIME {
-			event := runtime_get(&sequencer.runtime_pool, current_index)
-			next := event.active_next
-			moved := false
-
-			if event.parent != NIL_RUNTIME {
-				parent_event := runtime_get(&sequencer.runtime_pool, event.parent)
-				parent_finished := false
-				#partial switch _ in parent_event.kind {
-				case Runtime_Timeline:
-					pt := parent_event.kind.(Runtime_Timeline)
-					if pt.cursor == NIL_SOURCE do parent_finished = true
-				}
-
-				if parent_finished {
-					#partial switch _ in event.kind {
-					case Runtime_Note:
-						event.parent = NIL_RUNTIME
-					case Runtime_Timeline:
-						et := &event.kind.(Runtime_Timeline)
-						et.cursor = NIL_SOURCE
-						if prev == NIL_RUNTIME {
-							sequencer.active_head = next
-						} else {
-							runtime_get(&sequencer.runtime_pool, prev).active_next = next
-						}
-						if current_index == sequencer.active_tail {
-							sequencer.active_tail = prev
-						}
-						event.active_next = sequencer.finished_head
-						sequencer.finished_head = current_index
-						moved = true
-						changed = true
-					}
-				}
-			}
-
-			if !moved do prev = current_index
-			current_index = next
-		}
-		if !changed do break
+		current_index = next_index
 	}
 
 	current_index = sequencer.finished_head
 	for current_index != NIL_RUNTIME {
-		event := runtime_get(&sequencer.runtime_pool, current_index)
-		next := event.active_next
+		next_index := runtime_get(&sequencer.runtime_pool, current_index).active_next
 		runtime_free(&sequencer.runtime_pool, current_index)
-		current_index = next
+		current_index = next_index
 	}
 	sequencer.finished_head = NIL_RUNTIME
 }
