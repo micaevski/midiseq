@@ -56,15 +56,19 @@ Source_Event :: struct {
 
 // Runtime_Note is the in-flight version of a fired Note. The parent
 // timeline that fired it may retire before the note finishes, so the
-// note carries everything note-off needs:
+// note carries everything note-off needs already baked:
 //
 //   number             — already transposed (source.number + parent.transposition).
 //   duration           — already root-time (source.duration / parent.rate).
-//   parent_source_idx  — the source ref that fired this note. Used to
-//                        look up the channel (and the ref's name).
+//   channel            — looked up from the parent ref at fire time;
+//                        baked so note-off goes to the same MIDI
+//                        channel as note-on regardless of any later
+//                        change to the parent ref.
+//   parent_source_idx  — kept for the visualizer's name lookup.
 Runtime_Note :: struct {
 	number:            i32,
 	duration:          f32,
+	channel:           i32,
 	parent_source_idx: Source_Index,
 }
 
@@ -303,11 +307,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 		switch k in event.kind {
 		case Runtime_Note:
 			if event.beat + k.duration <= sequencer.beat {
-				sink_note_off(
-					&sequencer.sink,
-					channel_of(sequencer, k.parent_source_idx),
-					k.number,
-				)
+				sink_note_off(&sequencer.sink, k.channel, k.number)
 				finished = true
 			}
 		case Runtime_Timeline:
@@ -434,14 +434,16 @@ play_timeline :: proc(
 
 		switch k in cursor_event.kind {
 		case Note:
+			chan := channel_of(sequencer, timeline.source_idx)
 			runtime_event.kind = Runtime_Note {
 				number            = k.number + timeline.transposition,
 				duration          = k.duration / timeline.rate,
+				channel           = chan,
 				parent_source_idx = timeline.source_idx,
 			}
 			sink_note_on(
 				&sequencer.sink,
-				channel_of(sequencer, timeline.source_idx),
+				chan,
 				k.number + timeline.transposition,
 				k.velocity,
 			)
