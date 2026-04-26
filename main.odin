@@ -9,11 +9,13 @@ import rl "vendor:raylib"
 SONG_PATH :: "song.midiseq"
 
 
-// Parse `path` into `parser`, then on success swap the parser's
-// source/names buffers into the sequencer, install the new root, and
-// restart playback. Sequencer is left untouched on parse or read
-// failure.
-reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, midi: ^Midi_Out, path: string) -> bool {
+// Parse `path` into `parser`. On success, rewire the runtime active
+// chain onto the new source via `reparse_fixup`, swap the parser's
+// source/names buffers into the sequencer, and continue ticking with
+// in-flight notes intact. If the active chain is empty (initial load
+// or everything got retired), spawn a fresh root via `start_sequencer`.
+// Sequencer is left untouched on parse or read failure.
+reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string) -> bool {
 	bytes, err := os.read_entire_file(path, context.allocator)
 	if err != nil {
 		fmt.eprintfln("could not read %s: %v", path, err)
@@ -24,17 +26,20 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, midi: ^Midi_
 	new_root, ok := seq.parse_source(parser, string(bytes))
 	if !ok do return false
 
-	midi_all_notes_off(midi)
+	// Rewire runtime cursors before the swap (uses old names + new
+	// names.by_name, both alive at this point).
+	seq.adapt_to_source(sequencer, &parser.source, &parser.names)
 
-	// Ping-pong: parser ↔ sequencer. The parser ends up holding what
-	// the sequencer had; that buffer becomes scratch for the next
-	// parse and gets reset at the top of `parse_source`.
+	// Ping-pong: parser ↔ sequencer.
 	parser.source, sequencer.source = sequencer.source, parser.source
 	parser.names, sequencer.names = sequencer.names, parser.names
 
 	sequencer.source_root = new_root
 	sequencer.rng_state = parser.rng_state
-	seq.start_sequencer(sequencer)
+
+	if sequencer.active_head == seq.NIL_RUNTIME {
+		seq.start_sequencer(sequencer)
+	}
 	return true
 }
 
@@ -52,7 +57,7 @@ main :: proc() {
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
 
-	if !reload_song(&sequencer, &parser, &midi, SONG_PATH) do return
+	if !reload_song(&sequencer, &parser, SONG_PATH) do return
 
 	watcher := File_Watcher{path = SONG_PATH}
 	file_watcher_poll(&watcher) // prime: first poll always returns true
@@ -75,7 +80,7 @@ main :: proc() {
 		if rl.IsKeyPressed(.TAB) do show_debug = !show_debug
 
 		if file_watcher_poll(&watcher) {
-			reload_song(&sequencer, &parser, &midi, SONG_PATH)
+			reload_song(&sequencer, &parser, SONG_PATH)
 		}
 
 		if playing && !seq.sequencer_finished(&sequencer) {

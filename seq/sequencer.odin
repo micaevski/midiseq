@@ -1,5 +1,6 @@
 package seq
 
+import "core:math"
 import "core:mem"
 
 
@@ -40,7 +41,7 @@ Source_Kind :: union {
 	Source_Timeline,
 }
 
-// Source_Event lives in the source pool and is written by the parser.
+// Source_Event is the authored shape of one event in the source pool.
 // `prev`/`next` form the sibling chain inside a parent timeline's
 // children list.
 Source_Event :: struct {
@@ -143,9 +144,15 @@ source_get :: proc(s: ^[dynamic]Source_Event, index: Source_Index) -> ^Source_Ev
 // `lookup` maps a source-pool index to a human-readable name from the
 // DSL: top-level definitions get their own name, references get the
 // name of their target (so `BASS(0)` is labeled "BASS"). Strings are
-// cloned into `arena` during parse.
+// cloned into `arena` while the source is being built.
+//
+// `by_name` is the inverse for *top-level definitions only* — used to
+// resolve a name back to its source-pool index, including by
+// `adapt_to_source` when remapping the runtime chain onto a freshly
+// built source.
 Names :: struct {
 	lookup:    map[Source_Index]string,
+	by_name:   map[string]Source_Index,
 	arena:     mem.Arena,
 	arena_buf: []byte,
 }
@@ -155,19 +162,22 @@ make_names :: proc() -> Names {
 	n.arena_buf = make([]byte, NAMES_ARENA_BYTES)
 	mem.arena_init(&n.arena, n.arena_buf)
 	n.lookup = make(map[Source_Index]string, 32)
+	n.by_name = make(map[string]Source_Index, 16)
 	return n
 }
 
 destroy_names :: proc(n: ^Names) {
 	delete(n.lookup)
+	delete(n.by_name)
 	delete(n.arena_buf)
 	n^ = {}
 }
 
-// Wipe the map and rewind the arena so the next parse starts fresh in
-// the same backing storage.
+// Wipe both maps and rewind the arena so the next build can start
+// fresh in the same backing storage.
 names_reset :: proc(n: ^Names) {
 	clear(&n.lookup)
+	clear(&n.by_name)
 	mem.arena_free_all(&n.arena)
 }
 
@@ -255,6 +265,94 @@ add_source_event :: proc(
 
 // ===== Sequencer driver =====
 
+// Rewire the runtime chain to refer to a freshly-built source pool
+// before the caller swaps it in. Walks the active chain once and
+// remaps each event's source indices onto the new pool by name (old
+// `lookup` → new `by_name`). Events whose symbol is gone in the new
+// source are flagged for retirement via the markers below; the next
+// `sequencer_tick`'s `reap` pass will note-off and free them.
+//
+// "Mark for retirement" markers, chosen so the existing `reap` reaps
+// them without any extra cases:
+//   - Runtime_Note: `event.beat = -∞` so `beat + duration <= seq.beat`
+//     trips immediately. Note-off fires on the baked channel.
+//   - Runtime_Timeline: `cursor = NIL_SOURCE` (the natural exit).
+adapt_to_source :: proc(
+	sequencer: ^Sequencer,
+	new_source: ^[dynamic]Source_Event,
+	new_names: ^Names,
+) {
+	cur := sequencer.active_head
+	for cur != NIL_RUNTIME {
+		event := runtime_get(&sequencer.runtime_pool, cur)
+		switch _ in event.kind {
+		case Runtime_Note:
+			n := &event.kind.(Runtime_Note)
+			if new_idx, ok := remap_idx(n.parent_source_idx, &sequencer.names, new_names); ok {
+				n.parent_source_idx = new_idx
+			} else {
+				// Mark note for retirement by setting time in the past.
+				event.beat = math.inf_f32(-1)
+			}
+		case Runtime_Timeline:
+			t := &event.kind.(Runtime_Timeline)
+			if new_idx, ok := remap_idx(t.source_idx, &sequencer.names, new_names); ok {
+				t.source_idx = new_idx
+				t.cursor = first_cursor_after(
+					new_source,
+					new_idx,
+					(sequencer.beat - event.beat) * t.rate,
+				)
+			} else {
+				t.cursor = NIL_SOURCE
+			}
+		}
+		cur = event.active_next
+	}
+}
+
+
+// Resolve `old_idx` (an index into the old source) to the equivalent
+// index in the new source, by name. Returns (NIL_SOURCE, false) if
+// the symbol is no longer present in the new source.
+@(private)
+remap_idx :: proc(
+	old_idx: Source_Index,
+	old_names: ^Names,
+	new_names: ^Names,
+) -> (
+	Source_Index,
+	bool,
+) {
+	name, has_name := old_names.lookup[old_idx]
+	if !has_name do return NIL_SOURCE, false
+	new_idx, exists := new_names.by_name[name]
+	if !exists do return NIL_SOURCE, false
+	return new_idx, true
+}
+
+
+// Walk the children chain of the Source_Timeline at `def_idx` in `s`
+// and return the first child whose beat is strictly past `local_time`.
+// Returns NIL_SOURCE if none. Used by `adapt_to_source` to plant a
+// runtime timeline's cursor onto the new chain at the equivalent
+// position; earlier events are silently skipped.
+@(private)
+first_cursor_after :: proc(
+	s: ^[dynamic]Source_Event,
+	def_idx: Source_Index,
+	local_time: f32,
+) -> Source_Index {
+	walker := source_get(s, def_idx).kind.(Source_Timeline).first
+	for walker != NIL_SOURCE {
+		we := source_get(s, walker)
+		if we.beat > local_time do return walker
+		walker = we.next
+	}
+	return NIL_SOURCE
+}
+
+
 // Reset the runtime pool, allocate a fresh root timeline instance, and
 // install it as the only entry on the active chain. Safe to call
 // repeatedly (Stop -> Start).
@@ -319,7 +417,8 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 				if sequencer.active_tail == NIL_RUNTIME {
 					sequencer.active_head = spawn_head
 				} else {
-					runtime_get(&sequencer.runtime_pool, sequencer.active_tail).active_next = spawn_head
+					runtime_get(&sequencer.runtime_pool, sequencer.active_tail).active_next =
+						spawn_head
 				}
 				sequencer.active_tail = spawn_tail
 			}
@@ -441,12 +540,7 @@ play_timeline :: proc(
 				channel           = chan,
 				parent_source_idx = timeline.source_idx,
 			}
-			sink_note_on(
-				&sequencer.sink,
-				chan,
-				k.number + timeline.transposition,
-				k.velocity,
-			)
+			sink_note_on(&sequencer.sink, chan, k.number + timeline.transposition, k.velocity)
 		case Source_Timeline:
 			runtime_event.kind = Runtime_Timeline {
 				cursor        = k.first,

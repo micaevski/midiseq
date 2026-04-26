@@ -19,8 +19,11 @@ import "core:strings"
 // is also intended to be transferred to the sequencer on a successful
 // swap.
 //
-// The remaining fields (`src`, `pos`, `line`, `col`, `symbols`) are
-// transient parse-time state and get re-initialized each call.
+// `src`/`pos`/`line`/`col` are transient parse-time state, reinitialized
+// each call. The forward `name → top-level def index` map lives on
+// `names.by_name` so it ships along with the names buffer to the
+// sequencer (and so `adapt_to_source` doesn't need to know about the
+// parser at all).
 Parser :: struct {
 	source:    [dynamic]Source_Event,
 	names:     Names,
@@ -30,7 +33,6 @@ Parser :: struct {
 	pos:       int,
 	line:      int,
 	col:       int,
-	symbols:   map[string]Source_Index,
 }
 
 
@@ -78,16 +80,6 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	parser.line = 1
 	parser.col = 1
 
-	// `symbols` lives just for this call. Use a temporary arena so the
-	// map's bookkeeping vanishes when we return.
-	backing := make([]byte, 256 * 1024)
-	defer delete(backing)
-
-	arena: mem.Arena
-	mem.arena_init(&arena, backing)
-	parse_alloc := mem.arena_allocator(&arena)
-	parser.symbols = make(map[string]Source_Index, 16, parse_alloc)
-
 	// Pass 1: discover every `IDENT:` header and reserve a Timeline
 	// event for it. Element calls are skipped by balancing parens.
 	if !pass_1(parser) do return NIL_SOURCE, false
@@ -115,7 +107,7 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 // head.
 @(private)
 resolve_references :: proc(p: ^Parser) {
-	for _, top_index in p.symbols {
+	for _, top_index in p.names.by_name {
 		top_event := source_get(&p.source, top_index)
 		top_timeline, ok := top_event.kind.(Source_Timeline)
 		if !ok do continue
@@ -174,7 +166,7 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			top_event := source_get(&p.source, idx)
 			top_event.chance = 100
 			top_event.kind = Source_Timeline{rate = 1}
-			p.symbols[name] = idx
+			p.names.by_name[name] = idx
 			// `LABEL: "path.mid"` form — skip the path here; pass_2
 			// loads the file.
 			skip_ws(p)
@@ -232,7 +224,7 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 		case ':':
 			p.pos += 1
 			p.col += 1
-			idx := p.symbols[name]
+			idx := p.names.by_name[name]
 			// Names from p.src are slices into the caller-owned source
 			// string and disappear once parsing is done; clone into the
 			// parser's names arena so they survive the swap into the
@@ -352,7 +344,7 @@ skip_call_args :: proc(p: ^Parser) -> bool {
 // `name` has already been consumed; we're sitting on the `(`.
 @(private)
 parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
-	target, exists := p.symbols[name]
+	target, exists := p.names.by_name[name]
 	if !exists {
 		parse_error(p, "undefined reference: %s", name)
 		return false
