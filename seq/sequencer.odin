@@ -7,28 +7,17 @@ import "core:mem"
 DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Runtime_Event)
 NAMES_ARENA_BYTES :: 16 * 1024
 
-
-// Distinct index types for the two pools. Index 0 is the nil sentinel for
-// both, so default-zeroed fields safely mean "points to nothing".
 Source_Index :: distinct u32
 Runtime_Index :: distinct u32
 NIL_SOURCE :: Source_Index(0)
 NIL_RUNTIME :: Runtime_Index(0)
 
-
-// Shared between source and runtime — a Note carries the same data on
-// both sides.
 Note :: struct {
 	number:   i32, // MIDI note, 0..127
 	velocity: i32, // 0..127
 	duration: f32, // in beats; note-off fires at start_beat + duration
 }
 
-
-// ===== Source pool =====
-
-// Source_Timeline is the authored shape of a timeline (top-level def or
-// reference). `first` heads its child sibling chain.
 Source_Timeline :: struct {
 	first:         Source_Index,
 	channel:       i32,
@@ -41,9 +30,6 @@ Source_Kind :: union {
 	Source_Timeline,
 }
 
-// Source_Event is the authored shape of one event in the source pool.
-// `prev`/`next` form the sibling chain inside a parent timeline's
-// children list.
 Source_Event :: struct {
 	beat:   f32,
 	chance: i32, // 0..100; probability of firing. 100 = always.
@@ -52,20 +38,6 @@ Source_Event :: struct {
 	next:   Source_Index,
 }
 
-
-// ===== Runtime pool =====
-
-// Runtime_Note is the in-flight version of a fired Note. The parent
-// timeline that fired it may retire before the note finishes, so the
-// note carries everything note-off needs already baked:
-//
-//   number             — already transposed (source.number + parent.transposition).
-//   duration           — already root-time (source.duration / parent.rate).
-//   channel            — looked up from the parent ref at fire time;
-//                        baked so note-off goes to the same MIDI
-//                        channel as note-on regardless of any later
-//                        change to the parent ref.
-//   parent_source_idx  — kept for the visualizer's name lookup.
 Runtime_Note :: struct {
 	number:            i32,
 	duration:          f32,
@@ -73,13 +45,6 @@ Runtime_Note :: struct {
 	parent_source_idx: Source_Index,
 }
 
-// Runtime_Timeline is a live instance of a Source_Timeline.
-//
-//   cursor               — position in the *source* child chain we're firing from.
-//                          Walks `next` links in the source pool.
-//   source_idx           — the source ref event this runtime was cloned from.
-//                          Used to look up the ref's channel and name.
-//   transposition / rate — accumulated from ancestors at clone time.
 Runtime_Timeline :: struct {
 	cursor:        Source_Index,
 	source_idx:    Source_Index,
@@ -92,20 +57,12 @@ Runtime_Kind :: union {
 	Runtime_Timeline,
 }
 
-// Runtime_Event lives in the runtime pool and is created during playback.
-// `beat` is in root-time; `active_next` links into the sequencer's
-// single flat active chain.
 Runtime_Event :: struct {
 	beat:        f32,
 	kind:        Runtime_Kind,
 	active_next: Runtime_Index,
 }
 
-
-// Where the sequencer sends its output. The library is deliberately
-// agnostic about the actual backend — PortMidi, an in-process synth, a
-// logger, whatever. A driver installs the procs and the opaque user
-// pointer gets passed through on every call.
 Sink :: struct {
 	user:     rawptr,
 	note_on:  proc(user: rawptr, channel, number, velocity: i32),
@@ -113,18 +70,11 @@ Sink :: struct {
 }
 
 
-// The source-event store is a `[dynamic]Source_Event` whose capacity is
-// preset at make-time and never exceeded — `source_alloc` enforces that
-// by hand. Index 0 is reserved as the nil sentinel and is held by an
-// always-present zero element at slot 0.
-
 make_source_store :: proc(capacity: int) -> [dynamic]Source_Event {
 	return make([dynamic]Source_Event, 1, capacity) // len=1 reserves slot 0
 }
 
-// Rewind to length 1 without freeing the backing buffer. Slot 0 stays
-// zero (the nil sentinel); higher slots are treated as garbage and
-// overwritten by the next allocations.
+
 source_store_reset :: proc(s: ^[dynamic]Source_Event) {
 	resize(s, 1)
 	s[0] = {}
@@ -140,16 +90,6 @@ source_get :: proc(s: ^[dynamic]Source_Event, index: Source_Index) -> ^Source_Ev
 	return &s[index]
 }
 
-
-// `lookup` maps a source-pool index to a human-readable name from the
-// DSL: top-level definitions get their own name, references get the
-// name of their target (so `BASS(0)` is labeled "BASS"). Strings are
-// cloned into `arena` while the source is being built.
-//
-// `by_name` is the inverse for *top-level definitions only* — used to
-// resolve a name back to its source-pool index, including by
-// `adapt_to_source` when remapping the runtime chain onto a freshly
-// built source.
 Names :: struct {
 	lookup:    map[Source_Index]string,
 	by_name:   map[string]Source_Index,
@@ -173,8 +113,7 @@ destroy_names :: proc(n: ^Names) {
 	n^ = {}
 }
 
-// Wipe both maps and rewind the arena so the next build can start
-// fresh in the same backing storage.
+
 names_reset :: proc(n: ^Names) {
 	clear(&n.lookup)
 	clear(&n.by_name)
@@ -182,13 +121,6 @@ names_reset :: proc(n: ^Names) {
 }
 
 
-// The Sequencer owns:
-//   source       - the live source-event buffer (bump allocator).
-//   runtime_pool - transient instances created during playback.
-// `source_root` is the authored root. `active_head`/`active_tail` form
-// the single flat chain of all live runtime events (notes and
-// timelines), built from a fresh clone of the root every time
-// start_sequencer is called.
 Sequencer :: struct {
 	tempo:        f32,
 	beat:         f32,
@@ -220,11 +152,6 @@ destroy_sequencer :: proc(sequencer: ^Sequencer) {
 }
 
 
-// Insert `event` into the child list of the Source_Timeline stored at
-// `parent` in `s`, keeping the list sorted by beat. Ties go after
-// existing events at the same beat (stable insertion). Returns the new
-// event's index, or NIL_SOURCE if the storage is full. Panics if
-// `parent` is not a Source_Timeline.
 add_source_event :: proc(
 	s: ^[dynamic]Source_Event,
 	parent: Source_Index,
@@ -262,21 +189,10 @@ add_source_event :: proc(
 	return new_idx
 }
 
-
-// ===== Sequencer driver =====
-
-// Rewire the runtime chain to refer to a freshly-built source pool
-// before the caller swaps it in. Walks the active chain once and
-// remaps each event's source indices onto the new pool by name (old
-// `lookup` → new `by_name`). Events whose symbol is gone in the new
-// source are flagged for retirement via the markers below; the next
-// `sequencer_tick`'s `reap` pass will note-off and free them.
-//
-// "Mark for retirement" markers, chosen so the existing `reap` reaps
-// them without any extra cases:
-//   - Runtime_Note: `event.beat = -∞` so `beat + duration <= seq.beat`
-//     trips immediately. Note-off fires on the baked channel.
-//   - Runtime_Timeline: `cursor = NIL_SOURCE` (the natural exit).
+/*
+Adapt the running sequencer to a new source, point runtime events to the new sources if they still exists. 
+Retire events that belong to timeline that were removed by marking them to as finished.
+*/
 adapt_to_source :: proc(
 	sequencer: ^Sequencer,
 	new_source: ^[dynamic]Source_Event,
@@ -297,6 +213,7 @@ adapt_to_source :: proc(
 		case Runtime_Timeline:
 			t := &event.kind.(Runtime_Timeline)
 			if new_idx, ok := remap_idx(t.source_idx, &sequencer.names, new_names); ok {
+				// If the source timeline exists, set the cursor to point the same time.
 				t.source_idx = new_idx
 				t.cursor = first_cursor_after(
 					new_source,
@@ -304,6 +221,7 @@ adapt_to_source :: proc(
 					(sequencer.beat - event.beat) * t.rate,
 				)
 			} else {
+				// Mark timeline for retirement by pointing its cursor at nil.
 				t.cursor = NIL_SOURCE
 			}
 		}
@@ -311,10 +229,6 @@ adapt_to_source :: proc(
 	}
 }
 
-
-// Resolve `old_idx` (an index into the old source) to the equivalent
-// index in the new source, by name. Returns (NIL_SOURCE, false) if
-// the symbol is no longer present in the new source.
 @(private)
 remap_idx :: proc(
 	old_idx: Source_Index,
@@ -331,12 +245,6 @@ remap_idx :: proc(
 	return new_idx, true
 }
 
-
-// Walk the children chain of the Source_Timeline at `def_idx` in `s`
-// and return the first child whose beat is strictly past `local_time`.
-// Returns NIL_SOURCE if none. Used by `adapt_to_source` to plant a
-// runtime timeline's cursor onto the new chain at the equivalent
-// position; earlier events are silently skipped.
 @(private)
 first_cursor_after :: proc(
 	s: ^[dynamic]Source_Event,
@@ -352,10 +260,6 @@ first_cursor_after :: proc(
 	return NIL_SOURCE
 }
 
-
-// Reset the runtime pool, allocate a fresh root timeline instance, and
-// install it as the only entry on the active chain. Safe to call
-// repeatedly (Stop -> Start).
 start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.beat = 0
 
@@ -381,18 +285,11 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 	sequencer.active_tail = root_idx
 }
 
-// Advance the playhead by `dt` seconds and drive playback.
-//
-// One single-pass walk over the active chain:
-//
-//   - Runtime_Note: retire (note-off + free) when its end time has
-//     been reached.
-//   - Runtime_Timeline: tick its cursor via `play_timeline`, append
-//     the returned chain (already in root-time) onto `active_tail`.
-//     The walk re-reads `active_next` after the append, so newly
-//     spawned events are visited later in this same tick. The
-//     timeline retires when its cursor empties; its in-flight notes
-//     outlive it and retire on their own when their duration runs out.
+
+/*
+Walk the active events and retire events that have finished, fire note offs for finished notes.
+Call play_timeline for timelines to generate more runtime events, and append those to the active chain.
+*/
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
@@ -447,13 +344,9 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 }
 
 
-// Nothing is in flight.
 sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
 	return sequencer.active_head == NIL_RUNTIME
 }
-
-
-// ===== Play =====
 
 @(private)
 sink_note_on :: proc(sink: ^Sink, channel, number, velocity: i32) {
@@ -465,9 +358,6 @@ sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
 	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
 }
 
-// Look up the channel authored on a Source_Timeline. Used at note-on
-// (via the timeline's own `source_idx`) and note-off (via the note's
-// `parent_source_idx`).
 @(private)
 channel_of :: proc(sequencer: ^Sequencer, src: Source_Index) -> i32 {
 	return source_get(&sequencer.source, src).kind.(Source_Timeline).channel
@@ -486,16 +376,11 @@ rand_u32 :: proc(state: ^u32) -> u32 {
 	return x
 }
 
-// Walk one runtime timeline's source cursor up to `local_time` (in
-// beats, relative to that instance's own start). For each fired source
-// event, allocate a runtime event (firing note-on for notes) and
-// append it to a local spawn chain in firing order. Beats on spawned
-// events are translated into root-time using the timeline's own start
-// beat and accumulated rate, so the caller can splice the chain
-// straight onto the sequencer's active list.
-//
-// Returns the (head, tail) of the spawn chain so the caller can splice
-// in O(1) without re-walking.
+
+/*
+Walk the timeline event and create runtime events for all source events that fall within the current tick, fire notes immediately.
+Returns a linked list of active events (head and tail).
+*/
 play_timeline :: proc(
 	sequencer: ^Sequencer,
 	timeline_event_idx: Runtime_Index,
@@ -525,6 +410,7 @@ play_timeline :: proc(
 
 		new_idx := runtime_alloc(&sequencer.runtime_pool)
 		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
+
 		runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 		// Translate the source-domain beat into root-time. For the root
 		// timeline (rate=1, start=0) this is identity.
