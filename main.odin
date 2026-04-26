@@ -28,7 +28,7 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string
 
 	// Rewire runtime cursors before the swap (uses old names + new
 	// names.by_name, both alive at this point).
-	seq.adapt_to_source(sequencer, &parser.source, &parser.names)
+	seq.adapt_to_source(sequencer, &parser.source, &parser.names, new_root)
 
 	// Ping-pong: parser ↔ sequencer.
 	parser.source, sequencer.source = sequencer.source, parser.source

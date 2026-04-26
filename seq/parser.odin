@@ -25,14 +25,15 @@ import "core:strings"
 // sequencer (and so `adapt_to_source` doesn't need to know about the
 // parser at all).
 Parser :: struct {
-	source:    [dynamic]Source_Event,
-	names:     Names,
-	rng_state: u32,
+	source:      [dynamic]Source_Event,
+	names:       Names,
+	rng_state:   u32,
+	play_marked: [dynamic]Source_Index,
 
-	src:       string,
-	pos:       int,
-	line:      int,
-	col:       int,
+	src:         string,
+	pos:         int,
+	line:        int,
+	col:         int,
 }
 
 
@@ -41,12 +42,14 @@ make_parser :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Parser {
 	p := Parser{}
 	p.source = make_source_store(capacity)
 	p.names = make_names()
+	p.play_marked = make([dynamic]Source_Index, 0, 16)
 	return p
 }
 
 destroy_parser :: proc(p: ^Parser) {
 	delete(p.source)
 	destroy_names(&p.names)
+	delete(p.play_marked)
 	p^ = {}
 }
 
@@ -73,6 +76,7 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	// just received via swap on a previous successful reparse).
 	source_store_reset(&parser.source)
 	names_reset(&parser.names)
+	clear(&parser.play_marked)
 	parser.rng_state = 0
 
 	parser.src = src
@@ -89,15 +93,68 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	parser.pos = 0
 	parser.line = 1
 	parser.col = 1
-	root = pass_2(parser)
-	if root == NIL_SOURCE do return NIL_SOURCE, false
+	last := pass_2(parser)
+	if last == NIL_SOURCE do return NIL_SOURCE, false
 
 	// Pass 3: every top-level body is populated now, so we can rewrite
 	// each reference's stashed target-index into the target's actual
 	// children chain head.
 	resolve_references(parser)
 
+	// Build the dummy root: a synthetic Source_Timeline whose children
+	// are LABEL(0)-style refs to every @play-marked def. If no
+	// markers were given, fall back to the last definition (legacy
+	// "last def is root" behavior).
+	root = build_dummy_root(parser, last)
+	if root == NIL_SOURCE do return NIL_SOURCE, false
+
 	return root, true
+}
+
+
+@(private)
+build_dummy_root :: proc(p: ^Parser, last_def: Source_Index) -> Source_Index {
+	dummy_idx := source_alloc(&p.source)
+	if dummy_idx == NIL_SOURCE {
+		parse_error(p, "source storage full")
+		return NIL_SOURCE
+	}
+	dummy := source_get(&p.source, dummy_idx)
+	dummy.chance = 100
+	dummy.kind = Source_Timeline{rate = 1}
+
+	targets := p.play_marked[:]
+	if len(targets) == 0 {
+		// Fallback: the last definition is the implicit play target.
+		targets = []Source_Index{last_def}
+	}
+
+	for target_idx in targets {
+		target := source_get(&p.source, target_idx)
+		target_first := target.kind.(Source_Timeline).first
+		ref_idx := add_source_event(
+			&p.source,
+			dummy_idx,
+			Source_Event {
+				beat = 0,
+				chance = 100,
+				kind = Source_Timeline {
+					first = target_first,
+					transposition = 0,
+					rate = 1,
+				},
+			},
+		)
+		if ref_idx != NIL_SOURCE {
+			// Carry the target's name onto the ref so adapt_to_source
+			// can match new dummy-root children against old ones by name.
+			if name, has_name := p.names.lookup[target_idx]; has_name {
+				p.names.lookup[ref_idx] = name
+			}
+		}
+	}
+
+	return dummy_idx
 }
 
 
@@ -134,9 +191,26 @@ resolve_references :: proc(p: ^Parser) {
 // (and again in pass 2).
 @(private)
 pass_1 :: proc(p: ^Parser) -> bool {
+	pending_play := false
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
+
+		// `@play` line — flag the next IDENT: header.
+		if p.src[p.pos] == '@' {
+			p.pos += 1
+			p.col += 1
+			anno, ok_a := parse_ident(p)
+			if !ok_a {parse_error(p, "expected annotation name after '@'"); return false}
+			switch anno {
+			case "play":
+				pending_play = true
+			case:
+				parse_error(p, "unknown annotation: @%s", anno)
+				return false
+			}
+			continue
+		}
 
 		name, ok := parse_ident(p)
 		if !ok {
@@ -167,6 +241,10 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			top_event.chance = 100
 			top_event.kind = Source_Timeline{rate = 1}
 			p.names.by_name[name] = idx
+			if pending_play {
+				append(&p.play_marked, idx)
+				pending_play = false
+			}
 			// `LABEL: "path.mid"` form — skip the path here; pass_2
 			// loads the file.
 			skip_ws(p)
@@ -191,6 +269,10 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			return false
 		}
 	}
+	if pending_play {
+		parse_error(p, "@play with no following label")
+		return false
+	}
 	return true
 }
 
@@ -207,6 +289,15 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
+
+		// `@anno` lines were consumed for their effect in pass_1; just
+		// skip past them here so the surrounding loop stays in sync.
+		if p.src[p.pos] == '@' {
+			p.pos += 1
+			p.col += 1
+			_, _ = parse_ident(p)
+			continue
+		}
 
 		name, ok := parse_ident(p)
 		if !ok {

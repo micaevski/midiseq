@@ -104,6 +104,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 		next := e.active_next
 		switch k in e.kind {
 		case seq.Runtime_Note:
+			if k.parent_source_idx == sequencer.source_root do break
 			// find_lane may grow vis.lanes; resolve the index first so
 			// the slice access uses the post-append backing buffer.
 			li := find_lane(vis, k.parent_source_idx)
@@ -111,6 +112,7 @@ draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectan
 			ni := find_note(lane, k.number)
 			lane.notes[ni].seen = true
 		case seq.Runtime_Timeline:
+			if k.source_idx == sequencer.source_root do break
 			li := find_lane(vis, k.source_idx)
 			vis.lanes[li].seen = true
 		}
