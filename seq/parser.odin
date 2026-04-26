@@ -58,19 +58,19 @@ destroy_parser :: proc(p: ^Parser) {
 // swaps `parser.source`/`parser.names` into the live sequencer and
 // uses the returned root index.
 //
-// Syntax (one element per line is the natural style; whitespace and
-// blank lines are insignificant):
+// Grammar (line-oriented; one event per line):
 //
-//   IDENT [chan=N]:              // begins a top-level definition
-//   note(beat pitch [vel=V] [dur=D] [chance=C])
-//   NAME(beat [trans=T] [rate=R] [chance=C] [free])
-//   ...
-//   IDENT [chan=N]:              // begins the next top-level definition
+//   IDENT [chan=N] :             // header — begins a top-level definition
+//   NOTE [time] [vel=V] [dur=D] [chance=C]    // note event (e.g. C4 0 dur=2)
+//   IDENT [time] [trans=T] [rate=R] [chance=C] [free]  // ref event
+//   "path" [time]                // load notes from a MIDI file at `time`
 //
 //   SEED = N                     // optional directive
+//   @play                        // mark the next definition as a play target
+//   # ...                        // line comment
 //
-// A name reference must resolve to a timeline that has already been
-// defined earlier in the file. The last definition becomes the root.
+// `time` defaults to 0. Note names (C4, F#3, Ab-1, ...) are reserved
+// and cannot be used as label names.
 parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
 	// Wipe any leftovers from a previous parse (or from buffers we
 	// just received via swap on a previous successful reparse).
@@ -186,10 +186,10 @@ resolve_references :: proc(p: ^Parser) {
 }
 
 
-// Pass 1: walk the source linearly. Each `IDENT:` reserves a Timeline
-// slot in the source store; element calls (`name(...)`) are skipped
-// over via balanced parens. The `SEED = N` directive is consumed here
-// (and again in pass 2).
+// Pass 1: walk the source linearly. Each header (`IDENT [chan=N]:`)
+// reserves a Source_Timeline slot in the source store and registers
+// the label name; events on other lines are skipped (parsed in pass_2).
+// `SEED = N` is consumed here.
 @(private)
 pass_1 :: proc(p: ^Parser) -> bool {
 	pending_play := false
@@ -197,8 +197,10 @@ pass_1 :: proc(p: ^Parser) -> bool {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
 
+		c := p.src[p.pos]
+
 		// `@play` line — flag the next IDENT: header.
-		if p.src[p.pos] == '@' {
+		if c == '@' {
 			p.pos += 1
 			p.col += 1
 			anno, ok_a := parse_ident(p)
@@ -213,22 +215,23 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			continue
 		}
 
-		name, ok := parse_ident(p)
-		if !ok {
-			parse_error(p, "expected identifier")
-			return false
+		// String-literal event ("path" [time]) — owned by pass_2.
+		if c == '"' {
+			skip_to_line_end(p)
+			continue
 		}
 
-		skip_ws(p)
-		if p.pos >= len(p.src) {
-			parse_error(p, "unexpected end of file after %s", name)
-			return false
-		}
-
-		peek := p.src[p.pos]
-		if peek == ':' || is_ident_start(peek) {
+		// Header lines have a `:` somewhere on them; everything else
+		// is an event line (or a SEED directive).
+		if peek_line_has_colon(p) {
+			name, ok := parse_ident(p)
+			if !ok {parse_error(p, "expected identifier"); return false}
 			if name == "SEED" {
 				parse_error(p, "SEED uses '=', not ':'")
+				return false
+			}
+			if is_note_name_string(name) {
+				parse_error(p, "note name %s cannot be used as a label", name)
 				return false
 			}
 			idx := source_alloc(&p.source)
@@ -244,36 +247,41 @@ pass_1 :: proc(p: ^Parser) -> bool {
 				append(&p.play_marked, idx)
 				pending_play = false
 			}
-			if peek != ':' {
-				if !parse_def_kwargs(p, idx) do return false
-			}
+			if !parse_def_kwargs(p, idx) do return false
 			if !expect(p, ':') do return false
-			// `LABEL: "path.mid"` form — skip the path here; pass_2
-			// loads the file.
-			skip_ws(p)
-			if p.pos < len(p.src) && p.src[p.pos] == '"' {
-				if _, ok_s := parse_string_literal(p); !ok_s do return false
-			}
-		} else {
-			switch peek {
-			case '=':
-				if name != "SEED" {
-					parse_error(p, "unexpected '='; only SEED uses '='")
-					return false
-				}
-				p.pos += 1
-				p.col += 1
-				n, n_ok := parse_number(p)
-				if !n_ok {parse_error(p, "expected SEED value"); return false}
-				p.rng_state = u32(n)
-			case '(':
-				// Element call body — skip over balanced parens.
-				if !skip_call_args(p) do return false
-			case:
-				parse_error(p, "expected ':', '=' or '(' after %s", name)
-				return false
-			}
+			continue
 		}
+
+		// SEED = N
+		if is_ident_start(c) {
+			save_pos := p.pos
+			save_col := p.col
+			save_line := p.line
+			name, ok := parse_ident(p)
+			if !ok {parse_error(p, "expected identifier"); return false}
+			if name == "SEED" {
+				skip_inline_ws(p)
+				if p.pos < len(p.src) && p.src[p.pos] == '=' {
+					p.pos += 1
+					p.col += 1
+					n, n_ok := parse_number(p)
+					if !n_ok {parse_error(p, "expected SEED value"); return false}
+					p.rng_state = u32(n)
+					skip_to_line_end(p)
+					continue
+				}
+			}
+			// Not SEED — restore and treat as an event line in pass_2.
+			p.pos = save_pos
+			p.col = save_col
+			p.line = save_line
+			skip_to_line_end(p)
+			continue
+		}
+
+		// Anything else (number, operator, etc.) at line start is an
+		// event-shaped line that pass_2 will validate.
+		skip_to_line_end(p)
 	}
 	if pending_play {
 		parse_error(p, "@play with no following label")
@@ -283,10 +291,11 @@ pass_1 :: proc(p: ^Parser) -> bool {
 }
 
 
-// Pass 2: walk the source again. Each `IDENT:` rebinds the current
-// parent; each element call is added into that parent. Refs stash the
-// target's index in their `first` field — `resolve_references` rewrites
-// it into the target's children-chain head once all bodies are populated.
+// Pass 2: walk the source again. Each header rebinds the current
+// parent; each event line is parsed and added to that parent. Refs
+// stash the target's index in their `first` field — `resolve_references`
+// rewrites it into the target's children-chain head once all bodies are
+// populated.
 @(private)
 pass_2 :: proc(p: ^Parser) -> Source_Index {
 	last := NIL_SOURCE
@@ -296,29 +305,40 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
 
-		// `@anno` lines were consumed for their effect in pass_1; just
-		// skip past them here so the surrounding loop stays in sync.
-		if p.src[p.pos] == '@' {
+		c := p.src[p.pos]
+
+		// `@anno` lines — consumed for their effect in pass_1.
+		if c == '@' {
 			p.pos += 1
 			p.col += 1
 			_, _ = parse_ident(p)
 			continue
 		}
 
-		name, ok := parse_ident(p)
-		if !ok {
-			parse_error(p, "expected identifier")
-			return NIL_SOURCE
+		// String-literal event: "path" [time]
+		if c == '"' {
+			if current_parent == NIL_SOURCE {
+				parse_error(p, "file event appears before any top-level definition")
+				return NIL_SOURCE
+			}
+			path, ok_s := parse_string_literal(p)
+			if !ok_s do return NIL_SOURCE
+			skip_inline_ws(p)
+			time: f32 = 0
+			if !at_line_end(p) {
+				v, ok := parse_number(p)
+				if !ok {parse_error(p, "expected time after path"); return NIL_SOURCE}
+				time = v
+			}
+			if !expect_line_end(p) do return NIL_SOURCE
+			if !load_midi_into(p, path, current_parent, time) do return NIL_SOURCE
+			continue
 		}
 
-		skip_ws(p)
-		if p.pos >= len(p.src) {
-			parse_error(p, "unexpected end of file after %s", name)
-			return NIL_SOURCE
-		}
-
-		peek := p.src[p.pos]
-		if peek == ':' || is_ident_start(peek) {
+		// Header line.
+		if peek_line_has_colon(p) {
+			name, ok := parse_ident(p)
+			if !ok {parse_error(p, "expected identifier"); return NIL_SOURCE}
 			idx := p.names.by_name[name]
 			// Names from p.src are slices into the caller-owned source
 			// string and disappear once parsing is done; clone into the
@@ -328,54 +348,73 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 				name,
 				mem.arena_allocator(&p.names.arena),
 			)
-			if peek != ':' {
-				if !parse_def_kwargs(p, idx) do return NIL_SOURCE
-			}
+			if !parse_def_kwargs(p, idx) do return NIL_SOURCE
 			if !expect(p, ':') do return NIL_SOURCE
+			if !expect_line_end(p) do return NIL_SOURCE
 			current_parent = idx
 			last = idx
-			// `LABEL: "path.mid"` — read the MIDI file and add a Note
-			// child for each parsed note.
-			skip_ws(p)
-			if p.pos < len(p.src) && p.src[p.pos] == '"' {
-				path, ok_s := parse_string_literal(p)
-				if !ok_s do return NIL_SOURCE
-				if !load_midi_into(p, path, current_parent) do return NIL_SOURCE
+			continue
+		}
+
+		// Event or SEED. Notes start with a note letter, and might
+		// otherwise look like an ident; try the note pattern first.
+		if num, is_note := try_parse_note_name(p); is_note {
+			if current_parent == NIL_SOURCE {
+				parse_error(p, "event before any top-level definition")
+				return NIL_SOURCE
 			}
-		} else {
-			switch peek {
-			case '=':
-				// SEED — already applied in pass_1, just consume the value.
+			if !parse_note_event(p, current_parent, num) do return NIL_SOURCE
+			continue
+		}
+
+		if !is_ident_start(c) {
+			parse_error(p, "unexpected character %c", rune(c))
+			return NIL_SOURCE
+		}
+
+		name, ok := parse_ident(p)
+		if !ok {parse_error(p, "expected identifier"); return NIL_SOURCE}
+
+		if name == "SEED" {
+			skip_inline_ws(p)
+			if p.pos < len(p.src) && p.src[p.pos] == '=' {
 				p.pos += 1
 				p.col += 1
 				_, _ = parse_number(p)
-			case '(':
-				if current_parent == NIL_SOURCE {
-					parse_error(p, "%s(...) appears before any top-level definition", name)
-					return NIL_SOURCE
-				}
-				if name == "note" {
-					if !parse_note_call(p, current_parent) do return NIL_SOURCE
-				} else {
-					if !parse_ref_call(p, name, current_parent) do return NIL_SOURCE
-				}
-			case:
-				parse_error(p, "expected ':', '=' or '(' after %s", name)
-				return NIL_SOURCE
+				skip_to_line_end(p)
+				continue
 			}
+			parse_error(p, "SEED requires '= N'")
+			return NIL_SOURCE
 		}
+
+		if current_parent == NIL_SOURCE {
+			parse_error(p, "event before any top-level definition")
+			return NIL_SOURCE
+		}
+		if !parse_ref_event(p, name, current_parent) do return NIL_SOURCE
 	}
 	return last
 }
 
+@(private)
+expect_line_end :: proc(p: ^Parser) -> bool {
+	skip_inline_ws(p)
+	if p.pos < len(p.src) && p.src[p.pos] != '\n' {
+		parse_error(p, "unexpected trailing content")
+		return false
+	}
+	return true
+}
+
 
 // Read `path` from disk, parse it as a Standard MIDI File, and add a
-// Note source-event to `parent` for each parsed note. Path is resolved
-// relative to the current working directory. On any failure (read or
-// MIDI parse), emits a parse_error and returns false; the caller bails
-// out of pass_2 and parse_source returns ok=false.
+// Note source-event to `parent` for each parsed note (offset by `time`).
+// Path is resolved relative to the current working directory. On any
+// failure (read or MIDI parse), emits a parse_error and returns false;
+// the caller bails out of pass_2 and parse_source returns ok=false.
 @(private)
-load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index) -> bool {
+load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32) -> bool {
 	bytes, read_err := os.read_entire_file(path, context.allocator)
 	if read_err != nil {
 		parse_error(p, "could not read midi file %q: %v", path, read_err)
@@ -395,53 +434,11 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index) -> bool {
 			&p.source,
 			parent,
 			Source_Event {
-				beat = n.start_beat,
+				beat = n.start_beat + time,
 				chance = NOTE_DEFAULT_CHANCE,
 				kind = Note{number = n.number, velocity = n.velocity, duration = n.duration},
 			},
 		)
-	}
-	return true
-}
-
-
-// Skip a balanced `(...)` block starting at the current `(`.
-@(private)
-skip_call_args :: proc(p: ^Parser) -> bool {
-	if p.pos >= len(p.src) || p.src[p.pos] != '(' {
-		parse_error(p, "expected '('")
-		return false
-	}
-	p.pos += 1
-	p.col += 1
-	depth := 1
-	for p.pos < len(p.src) && depth > 0 {
-		switch p.src[p.pos] {
-		case '(':
-			depth += 1
-			p.pos += 1
-			p.col += 1
-		case ')':
-			depth -= 1
-			p.pos += 1
-			p.col += 1
-		case '\n':
-			p.pos += 1
-			p.line += 1
-			p.col = 1
-		case '#':
-			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
-				p.pos += 1
-				p.col += 1
-			}
-		case:
-			p.pos += 1
-			p.col += 1
-		}
-	}
-	if depth != 0 {
-		parse_error(p, "unterminated '('")
-		return false
 	}
 	return true
 }
@@ -452,9 +449,9 @@ skip_call_args :: proc(p: ^Parser) -> bool {
 @(private)
 parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
 	for {
-		skip_ws(p)
-		if p.pos >= len(p.src) {
-			parse_error(p, "unexpected end of file in definition header")
+		skip_inline_ws(p)
+		if p.pos >= len(p.src) || p.src[p.pos] == '\n' {
+			parse_error(p, "header missing ':'")
 			return false
 		}
 		if p.src[p.pos] == ':' do break
@@ -488,23 +485,27 @@ parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
 }
 
 
-// NAME( TIME [trans=T] [rate=R] [chance=C] ).
-// `name` has already been consumed; we're sitting on the `(`.
+// IDENT [time] [trans=T] [rate=R] [chance=C] [free]
+// `name` has already been consumed; we're sitting after it on the line.
 // Channel comes from the target def; wrap in another def if you want
 // per-instance channels.
 @(private)
-parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
+parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	target, exists := p.names.by_name[name]
 	if !exists {
 		parse_error(p, "undefined reference: %s", name)
 		return false
 	}
 
-	if !expect(p, '(') do return false
-	beat, ok_b := parse_number(p)
-	if !ok_b {parse_error(p, "expected time"); return false}
-
 	target_timeline := source_get(&p.source, target).kind.(Source_Timeline)
+
+	skip_inline_ws(p)
+	beat: f32 = 0
+	if !at_line_end(p) && !is_kwarg_start(p) {
+		v, ok := parse_number(p)
+		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		beat = v
+	}
 
 	trans: i32 = 0
 	rate: f32 = 1
@@ -512,17 +513,12 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	chan: i32 = target_timeline.channel
 	free: bool = false
 	for {
-		skip_ws(p)
-		if p.pos >= len(p.src) {
-			parse_error(p, "unterminated reference")
-			return false
-		}
-		if p.src[p.pos] == ')' do break
+		if at_line_end(p) do break
 
 		arg_name, ok_a := parse_ident(p)
-		if !ok_a {parse_error(p, "expected argument name or ')'"); return false}
+		if !ok_a {parse_error(p, "expected argument name"); return false}
 
-		skip_ws(p)
+		skip_inline_ws(p)
 		has_value := p.pos < len(p.src) && p.src[p.pos] == '='
 		if has_value {
 			p.pos += 1
@@ -566,7 +562,6 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 			return false
 		}
 	}
-	if !expect(p, ')') do return false
 
 	// Stash the target's index in `first`. It gets rewritten to the
 	// target's actual children chain head by resolve_references after
@@ -588,7 +583,7 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	)
 	if ref_idx != NIL_SOURCE {
 		// Refs don't have a name of their own; record the target's
-		// name so the debug view can label e.g. `BASS(0)` as "BASS".
+		// name so the debug view can label it.
 		p.names.lookup[ref_idx], _ = strings.clone(
 			name,
 			mem.arena_allocator(&p.names.arena),
@@ -602,31 +597,28 @@ NOTE_DEFAULT_VELOCITY :: 100
 NOTE_DEFAULT_DURATION :: 1.0
 NOTE_DEFAULT_CHANCE :: 100
 
-// note( TIME PITCH [vel=V] [dur=D] [chance=C] )
+// NOTE [time] [vel=V] [dur=D] [chance=C]
+// The note name has already been consumed by try_parse_note_name;
+// `pitch` is the resolved MIDI number.
 @(private)
-parse_note_call :: proc(p: ^Parser, parent: Source_Index) -> bool {
-	if !expect(p, '(') do return false
-
-	beat, ok_b := parse_number(p)
-	if !ok_b {parse_error(p, "expected time"); return false}
-
-	pitch, ok_p := parse_key(p)
-	if !ok_p {parse_error(p, "expected pitch"); return false}
+parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
+	skip_inline_ws(p)
+	beat: f32 = 0
+	if !at_line_end(p) && !is_kwarg_start(p) {
+		v, ok := parse_number(p)
+		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		beat = v
+	}
 
 	vel: i32 = NOTE_DEFAULT_VELOCITY
 	dur: f32 = NOTE_DEFAULT_DURATION
 	chance: i32 = NOTE_DEFAULT_CHANCE
 
 	for {
-		skip_ws(p)
-		if p.pos >= len(p.src) {
-			parse_error(p, "unterminated note call")
-			return false
-		}
-		if p.src[p.pos] == ')' do break
+		if at_line_end(p) do break
 
 		arg_name, ok_a := parse_ident(p)
-		if !ok_a {parse_error(p, "expected argument name or ')'"); return false}
+		if !ok_a {parse_error(p, "expected argument name"); return false}
 		if !expect(p, '=') do return false
 
 		switch arg_name {
@@ -647,7 +639,6 @@ parse_note_call :: proc(p: ^Parser, parent: Source_Index) -> bool {
 			return false
 		}
 	}
-	if !expect(p, ')') do return false
 
 	add_source_event(
 		&p.source,
@@ -659,6 +650,25 @@ parse_note_call :: proc(p: ^Parser, parent: Source_Index) -> bool {
 		},
 	)
 	return true
+}
+
+// `name=...` form: returns true if the next token on the current line
+// is an ident immediately followed by `=`.
+@(private)
+is_kwarg_start :: proc(p: ^Parser) -> bool {
+	if p.pos >= len(p.src) do return false
+	if !is_ident_start(p.src[p.pos]) do return false
+	pos := p.pos + 1
+	for pos < len(p.src) {
+		c := p.src[pos]
+		if is_alpha(c) || is_digit(c) || c == '_' {
+			pos += 1
+		} else {
+			break
+		}
+	}
+	for pos < len(p.src) && (p.src[pos] == ' ' || p.src[pos] == '\t') do pos += 1
+	return pos < len(p.src) && p.src[pos] == '='
 }
 
 
@@ -686,9 +696,157 @@ skip_ws :: proc(p: ^Parser) {
 	}
 }
 
+// Like skip_ws but stops at newlines.
+@(private)
+skip_inline_ws :: proc(p: ^Parser) {
+	for p.pos < len(p.src) {
+		switch p.src[p.pos] {
+		case ' ', '\t', '\r', ',':
+			p.pos += 1
+			p.col += 1
+		case '#':
+			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+				p.pos += 1
+				p.col += 1
+			}
+			return
+		case:
+			return
+		}
+	}
+}
+
+@(private)
+at_line_end :: proc(p: ^Parser) -> bool {
+	skip_inline_ws(p)
+	return p.pos >= len(p.src) || p.src[p.pos] == '\n'
+}
+
+@(private)
+skip_to_line_end :: proc(p: ^Parser) {
+	for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+		p.pos += 1
+		p.col += 1
+	}
+}
+
+// Look ahead from the current position to see if the rest of the
+// current line contains a `:` outside of any string literal.
+// Used to disambiguate a header line from an event line.
+@(private)
+peek_line_has_colon :: proc(p: ^Parser) -> bool {
+	pos := p.pos
+	in_string := false
+	for pos < len(p.src) {
+		c := p.src[pos]
+		if c == '\n' do return false
+		if c == '#' && !in_string do return false
+		if c == '"' do in_string = !in_string
+		if c == ':' && !in_string do return true
+		pos += 1
+	}
+	return false
+}
+
+// Return true if `s` matches the note-name pattern (e.g. "C4", "Bb3").
+// `#` cannot appear in a parsed ident, so only the flat form needs
+// checking here.
+@(private)
+is_note_name_string :: proc(s: string) -> bool {
+	if len(s) == 0 do return false
+	upper := s[0]
+	if upper >= 'a' && upper <= 'z' do upper -= 'a' - 'A'
+	if !(upper >= 'A' && upper <= 'G') do return false
+	pos := 1
+	if pos < len(s) && s[pos] == 'b' do pos += 1
+	if pos < len(s) && s[pos] == '-' do pos += 1
+	if pos >= len(s) || !is_digit(s[pos]) do return false
+	for pos < len(s) && is_digit(s[pos]) do pos += 1
+	return pos == len(s)
+}
+
+// Try to consume a note name at the current position. On success
+// advances `p` and returns the MIDI number; on failure restores `p`
+// and returns false (no error emitted).
+@(private)
+try_parse_note_name :: proc(p: ^Parser) -> (i32, bool) {
+	if p.pos >= len(p.src) do return 0, false
+	c := p.src[p.pos]
+	upper := c
+	if upper >= 'a' && upper <= 'z' do upper -= 'a' - 'A'
+	if !(upper >= 'A' && upper <= 'G') do return 0, false
+
+	save_pos := p.pos
+	save_col := p.col
+
+	base: i32
+	switch upper {
+	case 'C':
+		base = 0
+	case 'D':
+		base = 2
+	case 'E':
+		base = 4
+	case 'F':
+		base = 5
+	case 'G':
+		base = 7
+	case 'A':
+		base = 9
+	case 'B':
+		base = 11
+	}
+	p.pos += 1
+	p.col += 1
+
+	if p.pos < len(p.src) {
+		acc := p.src[p.pos]
+		if acc == '#' {
+			base += 1
+			p.pos += 1
+			p.col += 1
+		} else if acc == 'b' {
+			base -= 1
+			p.pos += 1
+			p.col += 1
+		}
+	}
+
+	octave_sign: i32 = 1
+	if p.pos < len(p.src) && p.src[p.pos] == '-' {
+		octave_sign = -1
+		p.pos += 1
+		p.col += 1
+	}
+	if p.pos >= len(p.src) || !is_digit(p.src[p.pos]) {
+		p.pos = save_pos
+		p.col = save_col
+		return 0, false
+	}
+
+	octave: i32 = 0
+	for p.pos < len(p.src) && is_digit(p.src[p.pos]) {
+		octave = octave * 10 + i32(p.src[p.pos] - '0')
+		p.pos += 1
+		p.col += 1
+	}
+	octave *= octave_sign
+
+	if p.pos < len(p.src) {
+		c2 := p.src[p.pos]
+		if is_alpha(c2) || c2 == '_' {
+			p.pos = save_pos
+			p.col = save_col
+			return 0, false
+		}
+	}
+
+	return (octave + 1) * 12 + base, true
+}
+
 @(private)
 expect :: proc(p: ^Parser, ch: u8) -> bool {
-	skip_ws(p)
+	skip_inline_ws(p)
 	if p.pos >= len(p.src) || p.src[p.pos] != ch {
 		parse_error(p, "expected '%c'", rune(ch))
 		return false
@@ -701,7 +859,7 @@ expect :: proc(p: ^Parser, ch: u8) -> bool {
 // Read a `"..."` literal. No escape sequences for now.
 @(private)
 parse_string_literal :: proc(p: ^Parser) -> (string, bool) {
-	skip_ws(p)
+	skip_inline_ws(p)
 	if p.pos >= len(p.src) || p.src[p.pos] != '"' do return "", false
 	p.pos += 1
 	p.col += 1
@@ -728,7 +886,7 @@ parse_string_literal :: proc(p: ^Parser) -> (string, bool) {
 
 @(private)
 parse_ident :: proc(p: ^Parser) -> (string, bool) {
-	skip_ws(p)
+	skip_inline_ws(p)
 	start := p.pos
 	if p.pos >= len(p.src) do return "", false
 	c := p.src[p.pos]
@@ -745,90 +903,9 @@ parse_ident :: proc(p: ^Parser) -> (string, bool) {
 	return p.src[start:p.pos], true
 }
 
-// A MIDI key can be written either as a raw number (e.g. 60) or as a
-// note name with an optional accidental and an octave (e.g. C4, F#3, Ab-1).
-// Sharp is '#'; flat is lowercase 'b' (uppercase B is a note letter).
-// The letter itself is case-insensitive. MIDI 60 = C4.
-@(private)
-parse_key :: proc(p: ^Parser) -> (i32, bool) {
-	skip_ws(p)
-	if p.pos >= len(p.src) do return 0, false
-
-	c := p.src[p.pos]
-	upper := c
-	if upper >= 'a' && upper <= 'z' do upper -= 'a' - 'A'
-	if upper >= 'A' && upper <= 'G' do return parse_note_name(p)
-
-	n, ok := parse_number(p)
-	if !ok do return 0, false
-	return i32(n), true
-}
-
-@(private)
-parse_note_name :: proc(p: ^Parser) -> (i32, bool) {
-	c := p.src[p.pos]
-	if c >= 'a' && c <= 'z' do c -= 'a' - 'A'
-
-	base: i32
-	switch c {
-	case 'C':
-		base = 0
-	case 'D':
-		base = 2
-	case 'E':
-		base = 4
-	case 'F':
-		base = 5
-	case 'G':
-		base = 7
-	case 'A':
-		base = 9
-	case 'B':
-		base = 11
-	case:
-		return 0, false
-	}
-	p.pos += 1
-	p.col += 1
-
-	if p.pos < len(p.src) {
-		acc := p.src[p.pos]
-		if acc == '#' {
-			base += 1
-			p.pos += 1
-			p.col += 1
-		} else if acc == 'b' {
-			base -= 1
-			p.pos += 1
-			p.col += 1
-		}
-	}
-
-	octave_sign: i32 = 1
-	if p.pos < len(p.src) && p.src[p.pos] == '-' {
-		octave_sign = -1
-		p.pos += 1
-		p.col += 1
-	}
-	if p.pos >= len(p.src) || !is_digit(p.src[p.pos]) {
-		parse_error(p, "expected octave after note name")
-		return 0, false
-	}
-
-	octave: i32 = 0
-	for p.pos < len(p.src) && is_digit(p.src[p.pos]) {
-		octave = octave * 10 + i32(p.src[p.pos] - '0')
-		p.pos += 1
-		p.col += 1
-	}
-	octave *= octave_sign
-
-	return (octave + 1) * 12 + base, true
-}
-
 @(private)
 parse_number :: proc(p: ^Parser) -> (f32, bool) {
-	skip_ws(p)
+	skip_inline_ws(p)
 	start := p.pos
 	if p.pos < len(p.src) && (p.src[p.pos] == '-' || p.src[p.pos] == '+') {
 		p.pos += 1
