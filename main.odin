@@ -59,7 +59,9 @@ main :: proc() {
 
 	if !reload_song(&sequencer, &parser, SONG_PATH) do return
 
-	watcher := File_Watcher{path = SONG_PATH}
+	watcher := File_Watcher {
+		path = SONG_PATH,
+	}
 	file_watcher_poll(&watcher) // prime: first poll always returns true
 
 	rl.InitWindow(900, 760, "midiseq")
@@ -98,12 +100,12 @@ main :: proc() {
 		}
 		if rl.GuiButton(rl.Rectangle{140, 20, 100, 40}, "Pause") {
 			if playing {
-				midi_all_notes_off(&midi)
+				seq.silence(&sequencer)
 			}
 			playing = false
 		}
 		if rl.GuiButton(rl.Rectangle{260, 20, 100, 40}, "Stop") {
-			midi_all_notes_off(&midi)
+			seq.silence(&sequencer)
 			seq.start_sequencer(&sequencer)
 			playing = false
 		}
@@ -124,12 +126,18 @@ main :: proc() {
 		} else {
 			draw_active(&vis, &sequencer, viz_area, dt)
 		}
-		ui_draw_text("[TAB] toggle debug", i32(viz_area.x) + 8, i32(viz_area.y + viz_area.height) - 20, 14, rl.GRAY)
+		ui_draw_text(
+			"[TAB] toggle debug",
+			i32(viz_area.x) + 8,
+			i32(viz_area.y + viz_area.height) - 20,
+			14,
+			rl.GRAY,
+		)
 
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
 
-	midi_all_notes_off(&midi)
+	seq.silence(&sequencer)
 	rl.WaitTime(0.05)
 }

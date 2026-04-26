@@ -122,16 +122,17 @@ names_reset :: proc(n: ^Names) {
 
 
 Sequencer :: struct {
-	tempo:        f32,
-	beat:         f32,
-	source_root:  Source_Index,
-	active_head:  Runtime_Index,
-	active_tail:  Runtime_Index,
-	source:       [dynamic]Source_Event,
-	runtime_pool: Runtime_Pool,
-	sink:         Sink,
-	rng_state:    u32, // xorshift32; set via `SEED = N` in source
-	names:        Names,
+	tempo:         f32,
+	beat:          f32,
+	source_root:   Source_Index,
+	active_head:   Runtime_Index,
+	active_tail:   Runtime_Index,
+	source:        [dynamic]Source_Event,
+	runtime_pool:  Runtime_Pool,
+	sink:          Sink,
+	rng_state:     u32, // xorshift32; set via `SEED = N` in source
+	names:         Names,
+	playing_notes: [16][128]Runtime_Index,
 }
 
 
@@ -199,9 +200,9 @@ adapt_to_source :: proc(
 	new_names: ^Names,
 	new_root: Source_Index,
 ) {
-	cur := sequencer.active_head
-	for cur != NIL_RUNTIME {
-		event := runtime_get(&sequencer.runtime_pool, cur)
+	current_index := sequencer.active_head
+	for current_index != NIL_RUNTIME {
+		event := runtime_get(&sequencer.runtime_pool, current_index)
 		switch _ in event.kind {
 		case Runtime_Note:
 			n := &event.kind.(Runtime_Note)
@@ -226,7 +227,7 @@ adapt_to_source :: proc(
 				t.cursor = NIL_SOURCE
 			}
 		}
-		cur = event.active_next
+		current_index = event.active_next
 	}
 
 	old_played := make(map[string]bool, 16, context.temp_allocator)
@@ -347,23 +348,28 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
 	prev := NIL_RUNTIME
-	cur := sequencer.active_head
-	for cur != NIL_RUNTIME {
-		event := runtime_get(&sequencer.runtime_pool, cur)
+	current_index := sequencer.active_head
+	for current_index != NIL_RUNTIME {
+		event := runtime_get(&sequencer.runtime_pool, current_index)
 
 		finished: bool
 		switch k in event.kind {
 		case Runtime_Note:
 			if event.beat + k.duration <= sequencer.beat {
-				sink_note_off(&sequencer.sink, k.channel, k.number)
+				if k.channel >= 0 && k.channel < 16 && k.number >= 0 && k.number < 128 {
+					if sequencer.playing_notes[k.channel][k.number] == current_index {
+						sequencer.sink.note_off(&sequencer.sink, k.channel, k.number)
+						sequencer.playing_notes[k.channel][k.number] = NIL_RUNTIME
+					}
+				}
 				finished = true
 			}
 		case Runtime_Timeline:
 			sub_local := (sequencer.beat - event.beat) * k.rate
-			spawn_head, spawn_tail := play_timeline(sequencer, cur, sub_local)
+			spawn_head, spawn_tail := play_timeline(sequencer, current_index, sub_local)
 			if spawn_head != NIL_RUNTIME {
 				// Append onto the active chain's tail. Re-reading `next`
-				// below picks up these spawns when `cur` was the old tail.
+				// below picks up these spawns when `current_index` was the old tail.
 				if sequencer.active_tail == NIL_RUNTIME {
 					sequencer.active_head = spawn_head
 				} else {
@@ -385,14 +391,14 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 			} else {
 				runtime_get(&sequencer.runtime_pool, prev).active_next = next
 			}
-			if cur == sequencer.active_tail {
+			if current_index == sequencer.active_tail {
 				sequencer.active_tail = prev
 			}
-			runtime_free(&sequencer.runtime_pool, cur)
+			runtime_free(&sequencer.runtime_pool, current_index)
 		} else {
-			prev = cur
+			prev = current_index
 		}
-		cur = next
+		current_index = next
 	}
 }
 
@@ -401,19 +407,15 @@ sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
 	return sequencer.active_head == NIL_RUNTIME
 }
 
-@(private)
-sink_note_on :: proc(sink: ^Sink, channel, number, velocity: i32) {
-	if sink.note_on != nil do sink.note_on(sink.user, channel, number, velocity)
-}
-
-@(private)
-sink_note_off :: proc(sink: ^Sink, channel, number: i32) {
-	if sink.note_off != nil do sink.note_off(sink.user, channel, number)
-}
-
-@(private)
-channel_of :: proc(sequencer: ^Sequencer, src: Source_Index) -> i32 {
-	return source_get(&sequencer.source, src).kind.(Source_Timeline).channel
+silence :: proc(sequencer: ^Sequencer) {
+	for ch in 0 ..< 16 {
+		for num in 0 ..< 128 {
+			if sequencer.playing_notes[ch][num] != NIL_RUNTIME {
+				sequencer.sink.note_off(&sequencer.sink, i32(ch), i32(num))
+				sequencer.playing_notes[ch][num] = NIL_RUNTIME
+			}
+		}
+	}
 }
 
 // xorshift32. Remaps 0 to a fixed non-zero so an un-seeded sequencer
@@ -472,14 +474,22 @@ play_timeline :: proc(
 
 		switch k in cursor_event.kind {
 		case Note:
-			chan := channel_of(sequencer, timeline.source_idx)
+			chan :=
+				source_get(&sequencer.source, timeline.source_idx).kind.(Source_Timeline).channel
+			num := k.number + timeline.transposition
 			runtime_event.kind = Runtime_Note {
-				number            = k.number + timeline.transposition,
+				number            = num,
 				duration          = k.duration / timeline.rate,
 				channel           = chan,
 				parent_source_idx = timeline.source_idx,
 			}
-			sink_note_on(&sequencer.sink, chan, k.number + timeline.transposition, k.velocity)
+			if chan >= 0 && chan < 16 && num >= 0 && num < 128 {
+				if sequencer.playing_notes[chan][num] != NIL_RUNTIME {
+					sequencer.sink.note_off(&sequencer.sink, chan, num)
+				}
+				sequencer.playing_notes[chan][num] = new_idx
+			}
+			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity)
 		case Source_Timeline:
 			runtime_event.kind = Runtime_Timeline {
 				cursor        = k.first,
