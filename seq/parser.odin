@@ -63,7 +63,7 @@ destroy_parser :: proc(p: ^Parser) {
 //
 //   IDENT [chan=N]:              // begins a top-level definition
 //   note(beat pitch [vel=V] [dur=D] [chance=C])
-//   NAME(beat [trans=T] [rate=R] [chance=C] [chan=N])
+//   NAME(beat [trans=T] [rate=R] [chance=C])
 //   ...
 //   IDENT [chan=N]:              // begins the next top-level definition
 //
@@ -121,7 +121,7 @@ build_dummy_root :: proc(p: ^Parser, last_def: Source_Index) -> Source_Index {
 	}
 	dummy := source_get(&p.source, dummy_idx)
 	dummy.chance = 100
-	dummy.kind = Source_Timeline{rate = 1}
+	dummy.kind = Source_Timeline{rate = 1, channel = -1}
 
 	targets := p.play_marked[:]
 	if len(targets) == 0 {
@@ -238,7 +238,7 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			}
 			top_event := source_get(&p.source, idx)
 			top_event.chance = 100
-			top_event.kind = Source_Timeline{rate = 1}
+			top_event.kind = Source_Timeline{rate = 1, channel = -1}
 			p.names.by_name[name] = idx
 			if pending_play {
 				append(&p.play_marked, idx)
@@ -488,8 +488,10 @@ parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
 }
 
 
-// NAME( TIME [trans=T] [rate=R] [chance=C] [chan=N] ).
+// NAME( TIME [trans=T] [rate=R] [chance=C] ).
 // `name` has already been consumed; we're sitting on the `(`.
+// Channel comes from the target def; wrap in another def if you want
+// per-instance channels.
 @(private)
 parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	target, exists := p.names.by_name[name]
@@ -502,7 +504,6 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	beat, ok_b := parse_number(p)
 	if !ok_b {parse_error(p, "expected time"); return false}
 
-	// Inherit the def's channel by default; explicit `chan=N` overrides.
 	target_timeline := source_get(&p.source, target).kind.(Source_Timeline)
 
 	trans: i32 = 0
@@ -534,15 +535,6 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 			c, ok := parse_number(p)
 			if !ok {parse_error(p, "expected chance"); return false}
 			chance = i32(c)
-		case "chan":
-			v, ok := parse_number(p)
-			if !ok {parse_error(p, "expected channel"); return false}
-			ch := i32(v)
-			if ch < 1 || ch > 16 {
-				parse_error(p, "channel must be 1..16, got %d", ch)
-				return false
-			}
-			chan = ch - 1
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false

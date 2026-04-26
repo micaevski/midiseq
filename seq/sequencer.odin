@@ -48,6 +48,7 @@ Runtime_Note :: struct {
 Runtime_Timeline :: struct {
 	cursor:        Source_Index,
 	source_idx:    Source_Index,
+	channel:       i32,
 	transposition: i32,
 	rate:          f32,
 }
@@ -230,6 +231,7 @@ adapt_to_source :: proc(
 		current_index = event.active_next
 	}
 
+	//TODO: review this code. It is ablout hadnling the @play directives
 	old_played := make(map[string]bool, 16, context.temp_allocator)
 	if sequencer.source_root != NIL_SOURCE {
 		old_root_event := source_get(&sequencer.source, sequencer.source_root)
@@ -266,6 +268,7 @@ adapt_to_source :: proc(
 					re.kind = Runtime_Timeline {
 						cursor        = ref_kind.first,
 						source_idx    = walker,
+						channel       = ref_kind.channel,
 						transposition = ref_kind.transposition,
 						rate          = ref_kind.rate,
 					}
@@ -330,6 +333,7 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 	root_event.kind = Runtime_Timeline {
 		cursor        = source_timeline.first,
 		source_idx    = sequencer.source_root,
+		channel       = source_timeline.channel,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
 	}
@@ -474,8 +478,8 @@ play_timeline :: proc(
 
 		switch k in cursor_event.kind {
 		case Note:
-			chan :=
-				source_get(&sequencer.source, timeline.source_idx).kind.(Source_Timeline).channel
+			chan := timeline.channel
+			if chan == -1 do chan = 0
 			num := k.number + timeline.transposition
 			runtime_event.kind = Runtime_Note {
 				number            = num,
@@ -491,9 +495,12 @@ play_timeline :: proc(
 			}
 			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity)
 		case Source_Timeline:
+			child_channel := k.channel
+			if timeline.channel != -1 do child_channel = timeline.channel
 			runtime_event.kind = Runtime_Timeline {
 				cursor        = k.first,
 				source_idx    = timeline.cursor,
+				channel       = child_channel,
 				transposition = k.transposition + timeline.transposition,
 				rate          = k.rate * timeline.rate,
 			}
