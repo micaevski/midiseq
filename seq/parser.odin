@@ -61,11 +61,11 @@ destroy_parser :: proc(p: ^Parser) {
 // Syntax (one element per line is the natural style; whitespace and
 // blank lines are insignificant):
 //
-//   IDENT:                       // begins a top-level definition
+//   IDENT [chan=N]:              // begins a top-level definition
 //   note(beat pitch [vel=V] [dur=D] [chance=C])
-//   NAME(beat [trans=T] [rate=R] [chance=C])
+//   NAME(beat [trans=T] [rate=R] [chance=C] [chan=N])
 //   ...
-//   IDENT:                       // begins the next top-level definition
+//   IDENT [chan=N]:              // begins the next top-level definition
 //
 //   SEED = N                     // optional directive
 //
@@ -131,7 +131,7 @@ build_dummy_root :: proc(p: ^Parser, last_def: Source_Index) -> Source_Index {
 
 	for target_idx in targets {
 		target := source_get(&p.source, target_idx)
-		target_first := target.kind.(Source_Timeline).first
+		target_top := target.kind.(Source_Timeline)
 		ref_idx := add_source_event(
 			&p.source,
 			dummy_idx,
@@ -139,7 +139,8 @@ build_dummy_root :: proc(p: ^Parser, last_def: Source_Index) -> Source_Index {
 				beat = 0,
 				chance = 100,
 				kind = Source_Timeline {
-					first = target_first,
+					first = target_top.first,
+					channel = target_top.channel,
 					transposition = 0,
 					rate = 1,
 				},
@@ -224,10 +225,8 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			return false
 		}
 
-		switch p.src[p.pos] {
-		case ':':
-			p.pos += 1
-			p.col += 1
+		peek := p.src[p.pos]
+		if peek == ':' || is_ident_start(peek) {
 			if name == "SEED" {
 				parse_error(p, "SEED uses '=', not ':'")
 				return false
@@ -245,28 +244,35 @@ pass_1 :: proc(p: ^Parser) -> bool {
 				append(&p.play_marked, idx)
 				pending_play = false
 			}
+			if peek != ':' {
+				if !parse_def_kwargs(p, idx) do return false
+			}
+			if !expect(p, ':') do return false
 			// `LABEL: "path.mid"` form — skip the path here; pass_2
 			// loads the file.
 			skip_ws(p)
 			if p.pos < len(p.src) && p.src[p.pos] == '"' {
 				if _, ok_s := parse_string_literal(p); !ok_s do return false
 			}
-		case '=':
-			if name != "SEED" {
-				parse_error(p, "unexpected '='; only SEED uses '='")
+		} else {
+			switch peek {
+			case '=':
+				if name != "SEED" {
+					parse_error(p, "unexpected '='; only SEED uses '='")
+					return false
+				}
+				p.pos += 1
+				p.col += 1
+				n, n_ok := parse_number(p)
+				if !n_ok {parse_error(p, "expected SEED value"); return false}
+				p.rng_state = u32(n)
+			case '(':
+				// Element call body — skip over balanced parens.
+				if !skip_call_args(p) do return false
+			case:
+				parse_error(p, "expected ':', '=' or '(' after %s", name)
 				return false
 			}
-			p.pos += 1
-			p.col += 1
-			n, n_ok := parse_number(p)
-			if !n_ok {parse_error(p, "expected SEED value"); return false}
-			p.rng_state = u32(n)
-		case '(':
-			// Element call body — skip over balanced parens.
-			if !skip_call_args(p) do return false
-		case:
-			parse_error(p, "expected ':', '=' or '(' after %s", name)
-			return false
 		}
 	}
 	if pending_play {
@@ -311,10 +317,8 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 			return NIL_SOURCE
 		}
 
-		switch p.src[p.pos] {
-		case ':':
-			p.pos += 1
-			p.col += 1
+		peek := p.src[p.pos]
+		if peek == ':' || is_ident_start(peek) {
 			idx := p.names.by_name[name]
 			// Names from p.src are slices into the caller-owned source
 			// string and disappear once parsing is done; clone into the
@@ -324,6 +328,10 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 				name,
 				mem.arena_allocator(&p.names.arena),
 			)
+			if peek != ':' {
+				if !parse_def_kwargs(p, idx) do return NIL_SOURCE
+			}
+			if !expect(p, ':') do return NIL_SOURCE
 			current_parent = idx
 			last = idx
 			// `LABEL: "path.mid"` — read the MIDI file and add a Note
@@ -334,24 +342,27 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 				if !ok_s do return NIL_SOURCE
 				if !load_midi_into(p, path, current_parent) do return NIL_SOURCE
 			}
-		case '=':
-			// SEED — already applied in pass_1, just consume the value.
-			p.pos += 1
-			p.col += 1
-			_, _ = parse_number(p)
-		case '(':
-			if current_parent == NIL_SOURCE {
-				parse_error(p, "%s(...) appears before any top-level definition", name)
+		} else {
+			switch peek {
+			case '=':
+				// SEED — already applied in pass_1, just consume the value.
+				p.pos += 1
+				p.col += 1
+				_, _ = parse_number(p)
+			case '(':
+				if current_parent == NIL_SOURCE {
+					parse_error(p, "%s(...) appears before any top-level definition", name)
+					return NIL_SOURCE
+				}
+				if name == "note" {
+					if !parse_note_call(p, current_parent) do return NIL_SOURCE
+				} else {
+					if !parse_ref_call(p, name, current_parent) do return NIL_SOURCE
+				}
+			case:
+				parse_error(p, "expected ':', '=' or '(' after %s", name)
 				return NIL_SOURCE
 			}
-			if name == "note" {
-				if !parse_note_call(p, current_parent) do return NIL_SOURCE
-			} else {
-				if !parse_ref_call(p, name, current_parent) do return NIL_SOURCE
-			}
-		case:
-			parse_error(p, "expected ':', '=' or '(' after %s", name)
-			return NIL_SOURCE
 		}
 	}
 	return last
@@ -436,7 +447,48 @@ skip_call_args :: proc(p: ^Parser) -> bool {
 }
 
 
-// NAME( TIME [trans=T] [rate=R] [chance=C] ).
+// IDENT [kwarg=value]* :  — kwargs that customize the def's Source_Timeline.
+// Stops at the first `:`. The caller consumes the colon.
+@(private)
+parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
+	for {
+		skip_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unexpected end of file in definition header")
+			return false
+		}
+		if p.src[p.pos] == ':' do break
+
+		arg_name, ok := parse_ident(p)
+		if !ok {
+			parse_error(p, "expected argument name or ':'")
+			return false
+		}
+		if !expect(p, '=') do return false
+
+		ev := source_get(&p.source, def_idx)
+		t := &ev.kind.(Source_Timeline)
+
+		switch arg_name {
+		case "chan":
+			v, vok := parse_number(p)
+			if !vok {parse_error(p, "expected channel"); return false}
+			ch := i32(v)
+			if ch < 1 || ch > 16 {
+				parse_error(p, "channel must be 1..16, got %d", ch)
+				return false
+			}
+			t.channel = ch - 1
+		case:
+			parse_error(p, "unknown definition argument: %s", arg_name)
+			return false
+		}
+	}
+	return true
+}
+
+
+// NAME( TIME [trans=T] [rate=R] [chance=C] [chan=N] ).
 // `name` has already been consumed; we're sitting on the `(`.
 @(private)
 parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
@@ -450,9 +502,13 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	beat, ok_b := parse_number(p)
 	if !ok_b {parse_error(p, "expected time"); return false}
 
+	// Inherit the def's channel by default; explicit `chan=N` overrides.
+	target_timeline := source_get(&p.source, target).kind.(Source_Timeline)
+
 	trans: i32 = 0
 	rate: f32 = 1
 	chance: i32 = 100
+	chan: i32 = target_timeline.channel
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) {
@@ -478,6 +534,15 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 			c, ok := parse_number(p)
 			if !ok {parse_error(p, "expected chance"); return false}
 			chance = i32(c)
+		case "chan":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected channel"); return false}
+			ch := i32(v)
+			if ch < 1 || ch > 16 {
+				parse_error(p, "channel must be 1..16, got %d", ch)
+				return false
+			}
+			chan = ch - 1
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
@@ -494,7 +559,12 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 		Source_Event {
 			beat = beat,
 			chance = chance,
-			kind = Source_Timeline{first = target, transposition = trans, rate = rate},
+			kind = Source_Timeline {
+				first = target,
+				channel = chan,
+				transposition = trans,
+				rate = rate,
+			},
 		},
 	)
 	if ref_idx != NIL_SOURCE {
@@ -771,6 +841,11 @@ parse_number :: proc(p: ^Parser) -> (f32, bool) {
 @(private)
 is_alpha :: proc(c: u8) -> bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+@(private)
+is_ident_start :: proc(c: u8) -> bool {
+	return is_alpha(c) || c == '_'
 }
 
 @(private)
