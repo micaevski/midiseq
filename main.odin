@@ -80,6 +80,22 @@ main :: proc() {
 	for !rl.WindowShouldClose() {
 		dt := rl.GetFrameTime()
 		if rl.IsKeyPressed(.TAB) do show_debug = !show_debug
+		if rl.IsKeyPressed(.SPACE) {
+			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+			if shift {
+				if seq.sequencer_finished(&sequencer) {
+					seq.start_sequencer(&sequencer)
+				}
+				playing = true
+			} else if playing {
+				seq.silence(&sequencer)
+				playing = false
+			} else {
+				seq.silence(&sequencer)
+				seq.start_sequencer(&sequencer)
+				playing = true
+			}
+		}
 
 		if file_watcher_poll(&watcher) {
 			reload_song(&sequencer, &parser, SONG_PATH)
