@@ -5,12 +5,12 @@ note(2 G3 vel=30)
 note(3 B3 vel=30)
 note(4 D4 vel=30)
 
-RICK: "rick.mid"
+
 
 PART:
 BASS(0)
-DRUMS(0)
-PART(5)
+BASS(2)
 
 SONG:
-RICK(0)
+"FJ.mid"
+SONG(4)
