@@ -63,7 +63,7 @@ destroy_parser :: proc(p: ^Parser) {
 //
 //   IDENT [chan=N]:              // begins a top-level definition
 //   note(beat pitch [vel=V] [dur=D] [chance=C])
-//   NAME(beat [trans=T] [rate=R] [chance=C])
+//   NAME(beat [trans=T] [rate=R] [chance=C] [free])
 //   ...
 //   IDENT [chan=N]:              // begins the next top-level definition
 //
@@ -510,6 +510,7 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 	rate: f32 = 1
 	chance: i32 = 100
 	chan: i32 = target_timeline.channel
+	free: bool = false
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) {
@@ -520,21 +521,46 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 
 		arg_name, ok_a := parse_ident(p)
 		if !ok_a {parse_error(p, "expected argument name or ')'"); return false}
-		if !expect(p, '=') do return false
+
+		skip_ws(p)
+		has_value := p.pos < len(p.src) && p.src[p.pos] == '='
+		if has_value {
+			p.pos += 1
+			p.col += 1
+		}
 
 		switch arg_name {
 		case "trans":
+			if !has_value {parse_error(p, "trans requires '=value'"); return false}
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected transposition"); return false}
 			trans = i32(v)
 		case "rate":
+			if !has_value {parse_error(p, "rate requires '=value'"); return false}
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected rate"); return false}
 			rate = v
 		case "chance":
+			if !has_value {parse_error(p, "chance requires '=value'"); return false}
 			c, ok := parse_number(p)
 			if !ok {parse_error(p, "expected chance"); return false}
 			chance = i32(c)
+		case "free":
+			if has_value {
+				val, ok := parse_ident(p)
+				if !ok {parse_error(p, "expected true or false"); return false}
+				switch val {
+				case "true":
+					free = true
+				case "false":
+					free = false
+				case:
+					parse_error(p, "free expects true or false, got %s", val)
+					return false
+				}
+			} else {
+				free = true
+			}
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
@@ -556,6 +582,7 @@ parse_ref_call :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
 				channel = chan,
 				transposition = trans,
 				rate = rate,
+				free = free,
 			},
 		},
 	)

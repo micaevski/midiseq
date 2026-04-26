@@ -23,6 +23,7 @@ Source_Timeline :: struct {
 	channel:       i32,
 	transposition: i32, // semitones
 	rate:          f32, // time-scale multiplier
+	free:          bool, // ref: spawn detaches from parent's lifecycle
 }
 
 Source_Kind :: union {
@@ -62,6 +63,7 @@ Runtime_Event :: struct {
 	beat:        f32,
 	kind:        Runtime_Kind,
 	active_next: Runtime_Index,
+	parent:      Runtime_Index,
 }
 
 Sink :: struct {
@@ -128,6 +130,7 @@ Sequencer :: struct {
 	source_root:   Source_Index,
 	active_head:   Runtime_Index,
 	active_tail:   Runtime_Index,
+	finished_head: Runtime_Index,
 	source:        [dynamic]Source_Event,
 	runtime_pool:  Runtime_Pool,
 	sink:          Sink,
@@ -265,6 +268,7 @@ adapt_to_source :: proc(
 					re := runtime_get(&sequencer.runtime_pool, new_idx)
 					re.beat = sequencer.beat
 					re.active_next = NIL_RUNTIME
+					re.parent = NIL_RUNTIME
 					re.kind = Runtime_Timeline {
 						cursor        = ref_kind.first,
 						source_idx    = walker,
@@ -338,16 +342,14 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 		rate          = source_timeline.rate,
 	}
 	root_event.active_next = NIL_RUNTIME
+	root_event.parent = NIL_RUNTIME
 
 	sequencer.active_head = root_idx
 	sequencer.active_tail = root_idx
+	sequencer.finished_head = NIL_RUNTIME
 }
 
 
-/*
-Walk the active events and retire events that have finished, fire note offs for finished notes.
-Call play_timeline for timelines to generate more runtime events, and append those to the active chain.
-*/
 sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
@@ -372,8 +374,6 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 			sub_local := (sequencer.beat - event.beat) * k.rate
 			spawn_head, spawn_tail := play_timeline(sequencer, current_index, sub_local)
 			if spawn_head != NIL_RUNTIME {
-				// Append onto the active chain's tail. Re-reading `next`
-				// below picks up these spawns when `current_index` was the old tail.
 				if sequencer.active_tail == NIL_RUNTIME {
 					sequencer.active_head = spawn_head
 				} else {
@@ -382,8 +382,6 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 				}
 				sequencer.active_tail = spawn_tail
 			}
-			// Re-read after potential append (`event` still valid; the
-			// runtime pool is a fixed slice).
 			finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE
 		}
 
@@ -398,12 +396,69 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 			if current_index == sequencer.active_tail {
 				sequencer.active_tail = prev
 			}
-			runtime_free(&sequencer.runtime_pool, current_index)
+			event.active_next = sequencer.finished_head
+			sequencer.finished_head = current_index
 		} else {
 			prev = current_index
 		}
 		current_index = next
 	}
+
+	for {
+		changed := false
+		prev = NIL_RUNTIME
+		current_index = sequencer.active_head
+		for current_index != NIL_RUNTIME {
+			event := runtime_get(&sequencer.runtime_pool, current_index)
+			next := event.active_next
+			moved := false
+
+			if event.parent != NIL_RUNTIME {
+				parent_event := runtime_get(&sequencer.runtime_pool, event.parent)
+				parent_finished := false
+				#partial switch _ in parent_event.kind {
+				case Runtime_Timeline:
+					pt := parent_event.kind.(Runtime_Timeline)
+					if pt.cursor == NIL_SOURCE do parent_finished = true
+				}
+
+				if parent_finished {
+					#partial switch _ in event.kind {
+					case Runtime_Note:
+						event.parent = NIL_RUNTIME
+					case Runtime_Timeline:
+						et := &event.kind.(Runtime_Timeline)
+						et.cursor = NIL_SOURCE
+						if prev == NIL_RUNTIME {
+							sequencer.active_head = next
+						} else {
+							runtime_get(&sequencer.runtime_pool, prev).active_next = next
+						}
+						if current_index == sequencer.active_tail {
+							sequencer.active_tail = prev
+						}
+						event.active_next = sequencer.finished_head
+						sequencer.finished_head = current_index
+						moved = true
+						changed = true
+					}
+				}
+			}
+
+			if !moved do prev = current_index
+			current_index = next
+		}
+		if !changed do break
+	}
+
+	current_index = sequencer.finished_head
+	for current_index != NIL_RUNTIME {
+		event := runtime_get(&sequencer.runtime_pool, current_index)
+		next := event.active_next
+		runtime_free(&sequencer.runtime_pool, current_index)
+		current_index = next
+	}
+	sequencer.finished_head = NIL_RUNTIME
 }
 
 
@@ -475,6 +530,7 @@ play_timeline :: proc(
 		// timeline (rate=1, start=0) this is identity.
 		runtime_event.beat = cursor_event.beat / timeline.rate + timeline_event.beat
 		runtime_event.active_next = NIL_RUNTIME
+		runtime_event.parent = timeline_event_idx
 
 		switch k in cursor_event.kind {
 		case Note:
@@ -495,6 +551,7 @@ play_timeline :: proc(
 			}
 			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity)
 		case Source_Timeline:
+			if k.free do runtime_event.parent = timeline_event.parent
 			child_channel := k.channel
 			if timeline.channel != -1 do child_channel = timeline.channel
 			runtime_event.kind = Runtime_Timeline {
@@ -504,6 +561,9 @@ play_timeline :: proc(
 				transposition = k.transposition + timeline.transposition,
 				rate          = k.rate * timeline.rate,
 			}
+		}
+		if timeline.source_idx == sequencer.source_root {
+			runtime_event.parent = NIL_RUNTIME
 		}
 
 		// Append (head→tail) so spawn_head stays in firing order.
