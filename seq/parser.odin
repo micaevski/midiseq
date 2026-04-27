@@ -442,9 +442,13 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 			&p.source,
 			parent,
 			Source_Event {
-				beat = n.start_beat + time,
+				beat = quantize(n.start_beat + time),
 				chance = NOTE_DEFAULT_CHANCE,
-				kind = Note{number = n.number, velocity = n.velocity, duration = n.duration},
+				kind = Note {
+					number = n.number,
+					velocity = n.velocity,
+					duration = max(quantize(n.duration), BEAT_QUANTUM),
+				},
 			},
 		)
 	}
@@ -563,7 +567,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 		&p.source,
 		parent,
 		Source_Event {
-			beat = beat,
+			beat = quantize(beat),
 			chance = chance,
 			kind = Source_Timeline {
 				first = target,
@@ -637,9 +641,13 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
 		&p.source,
 		parent,
 		Source_Event {
-			beat = beat,
+			beat = quantize(beat),
 			chance = chance,
-			kind = Note{number = pitch, velocity = vel, duration = dur},
+			kind = Note {
+				number = pitch,
+				velocity = vel,
+				duration = max(quantize(dur), BEAT_QUANTUM),
+			},
 		},
 	)
 	return true

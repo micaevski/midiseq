@@ -7,10 +7,17 @@ import "core:mem"
 DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Runtime_Event)
 NAMES_ARENA_BYTES :: 16 * 1024
 
+STEPS_PER_BEAT :: 4096
+BEAT_QUANTUM :: f32(1.0) / f32(STEPS_PER_BEAT)
+
 Source_Index :: distinct u32
 Runtime_Index :: distinct u32
 NIL_SOURCE :: Source_Index(0)
 NIL_RUNTIME :: Runtime_Index(0)
+
+quantize :: proc(t: f32) -> f32 {
+	return math.round(t * f32(STEPS_PER_BEAT)) / f32(STEPS_PER_BEAT)
+}
 
 Note :: struct {
 	number:   i32, // MIDI note, 0..127
@@ -383,7 +390,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 				(&event.kind.(Runtime_Timeline)).cursor = NIL_SOURCE
 				finished = true
 			} else {
-				sub_local := (sequencer.beat - event.beat) * k.rate
+				sub_local := quantize((sequencer.beat - event.beat) * k.rate)
 				spawn_head, spawn_tail := play_timeline(sequencer, current_index, sub_local)
 				if spawn_head != NIL_RUNTIME {
 					if sequencer.active_tail == NIL_RUNTIME {
@@ -492,7 +499,7 @@ play_timeline :: proc(
 		runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 		// Translate the source-domain beat into root-time. For the root
 		// timeline (rate=1, start=0) this is identity.
-		runtime_event.beat = cursor_event.beat / timeline.rate + timeline_event.beat
+		runtime_event.beat = quantize(cursor_event.beat / timeline.rate + timeline_event.beat)
 		runtime_event.active_next = NIL_RUNTIME
 		runtime_event.parent = timeline_event_idx
 
@@ -501,9 +508,10 @@ play_timeline :: proc(
 			chan := timeline.channel
 			if chan == -1 do chan = 0
 			num := k.number + timeline.transposition
+			duration := max(quantize(k.duration / timeline.rate), BEAT_QUANTUM)
 			runtime_event.kind = Runtime_Note {
 				number            = num,
-				duration          = k.duration / timeline.rate,
+				duration          = duration,
 				channel           = chan,
 				parent_source_idx = timeline.source_idx,
 			}
