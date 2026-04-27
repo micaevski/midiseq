@@ -50,19 +50,20 @@ Scale :: struct {
 	root: i32,
 }
 
-// Per-degree intervals in semitones. Each slice sums to 12 (one octave).
+// Scale-degree offsets in semitones from the scale's root, in ascending
+// order. The first offset is always 0; the last is < 12.
 @(private)
-SCALE_MAJOR := [?]i32{2, 2, 1, 2, 2, 2, 1}
+SCALE_MAJOR := [?]i32{0, 2, 4, 5, 7, 9, 11}
 @(private)
-SCALE_MINOR := [?]i32{2, 1, 2, 2, 1, 2, 2}
+SCALE_MINOR := [?]i32{0, 2, 3, 5, 7, 8, 10}
 @(private)
-SCALE_PENT_MAJ := [?]i32{2, 2, 3, 2, 3}
+SCALE_PENT_MAJ := [?]i32{0, 2, 4, 7, 9}
 @(private)
-SCALE_PENT_MIN := [?]i32{3, 2, 2, 3, 2}
+SCALE_PENT_MIN := [?]i32{0, 3, 5, 7, 10}
 
 
-// Returns the interval slice for `kind`, or nil for `None`.
-scale_intervals :: proc(kind: Scale_Kind) -> []i32 {
+// Returns the offsets slice for `kind`, or nil for `None`.
+scale_offsets :: proc(kind: Scale_Kind) -> []i32 {
 	switch kind {
 	case .None:
 		return nil
@@ -76,6 +77,56 @@ scale_intervals :: proc(kind: Scale_Kind) -> []i32 {
 		return SCALE_PENT_MIN[:]
 	}
 	return nil
+}
+
+
+// Shift `pitch` (a MIDI note number) by `degrees` scale degrees within
+// the scale defined by `root` (pitch class 0..11) and `offsets`
+// (ascending semitone offsets from root within one octave; offsets[0]==0,
+// last < 12). Pitches outside the scale round *down* to the nearest
+// scale degree first, then step. So in CM:
+//   C4  +2 → E4   (already in scale)
+//   C#4 +2 → E4   (round down to C, then +2)
+//   C#4 −2 → A3   (round down to C, then −2 wraps into prev octave)
+// `degrees == 0` is identity. `len(offsets) == 0` falls back to a raw
+// semitone shift.
+shift_in_scale :: proc(pitch: i32, degrees: i32, root: i32, offsets: []i32) -> i32 {
+	if degrees == 0 do return pitch
+	size := i32(len(offsets))
+	if size == 0 do return pitch + degrees
+
+	// Position of `pitch` relative to the scale root.
+	rel := pitch - root
+	rel_offset := mod_pos(rel, 12)
+	scale_octave := (rel - rel_offset) / 12
+
+	// Largest degree whose offset is ≤ rel_offset (round down).
+	degree_idx: i32 = 0
+	for i in 1 ..< size {
+		if offsets[i] > rel_offset do break
+		degree_idx = i
+	}
+
+	// Apply the shift; quotient = octave delta, remainder = new degree.
+	new_index := degree_idx + degrees
+	octave_delta := floor_div(new_index, size)
+	new_degree := mod_pos(new_index, size)
+
+	return root + (scale_octave + octave_delta) * 12 + offsets[new_degree]
+}
+
+
+@(private)
+mod_pos :: proc(a, m: i32) -> i32 {
+	r := a % m
+	if r < 0 do r += m
+	return r
+}
+
+
+@(private)
+floor_div :: proc(a, m: i32) -> i32 {
+	return (a - mod_pos(a, m)) / m
 }
 
 
