@@ -9,6 +9,31 @@ import rl "vendor:raylib"
 SONG_PATH :: "song.midiseq"
 
 
+draw_beat_counter :: proc(beat: f32, area: rl.Rectangle) {
+	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
+	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
+
+	ui_draw_text(
+		"BEAT",
+		i32(area.x) + 14,
+		i32(area.y) + 10,
+		14,
+		rl.Color{140, 140, 160, 255},
+	)
+
+	text := fmt.ctprintf("%.2f", beat)
+	size: i32 = 44
+	width := ui_measure_text(text, size)
+	ui_draw_text(
+		text,
+		i32(area.x + area.width / 2) - width / 2,
+		i32(area.y) + 38,
+		size,
+		rl.Color{220, 230, 255, 255},
+	)
+}
+
+
 // Parse `path` into `parser`. On success, rewire the runtime active
 // chain onto the new source via `reparse_fixup`, swap the parser's
 // source/names buffers into the sequencer, and continue ticking with
@@ -135,6 +160,8 @@ main :: proc() {
 			40,
 			240,
 		)
+
+		draw_beat_counter(sequencer.beat, rl.Rectangle{700, 20, 180, 100})
 
 		viz_area := rl.Rectangle{20, 160, 860, 580}
 		if show_debug {
