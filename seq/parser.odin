@@ -62,7 +62,7 @@ destroy_parser :: proc(p: ^Parser) {
 //
 //   IDENT [chan=N] :             // header — begins a top-level definition
 //   NOTE [time] [vel=V] [dur=D] [chance=C]    // note event (e.g. C4 0 dur=2)
-//   IDENT [time] [trans=T] [rate=R] [chance=C] [free]  // ref event
+//   IDENT[!] [time] [trans=T] [rate=R] [chance=C]  // ref event (`!` = free)
 //   "path" [time]                // load notes from a MIDI file at `time`
 //
 //   SEED = N                     // optional directive
@@ -388,11 +388,19 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 			return NIL_SOURCE
 		}
 
+		// `NAME!` is shorthand for `NAME free=true`.
+		auto_free := false
+		if p.pos < len(p.src) && p.src[p.pos] == '!' {
+			p.pos += 1
+			p.col += 1
+			auto_free = true
+		}
+
 		if current_parent == NIL_SOURCE {
 			parse_error(p, "event before any top-level definition")
 			return NIL_SOURCE
 		}
-		if !parse_ref_event(p, name, current_parent) do return NIL_SOURCE
+		if !parse_ref_event(p, name, current_parent, auto_free) do return NIL_SOURCE
 	}
 	return last
 }
@@ -485,12 +493,13 @@ parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
 }
 
 
-// IDENT [time] [trans=T] [rate=R] [chance=C] [free]
-// `name` has already been consumed; we're sitting after it on the line.
+// IDENT[!] [time] [trans=T] [rate=R] [chance=C]
+// `name` has already been consumed; we're sitting after it (and any `!`)
+// on the line. `auto_free` reflects whether `!` was present.
 // Channel comes from the target def; wrap in another def if you want
 // per-instance channels.
 @(private)
-parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
+parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_free: bool) -> bool {
 	target, exists := p.names.by_name[name]
 	if !exists {
 		parse_error(p, "undefined reference: %s", name)
@@ -511,7 +520,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool 
 	rate: f32 = 1
 	chance: i32 = 100
 	chan: i32 = target_timeline.channel
-	free: bool = false
+	free: bool = auto_free
 	for {
 		if at_line_end(p) do break
 
@@ -541,22 +550,6 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool 
 			c, ok := parse_number(p)
 			if !ok {parse_error(p, "expected chance"); return false}
 			chance = i32(c)
-		case "free":
-			if has_value {
-				val, ok := parse_ident(p)
-				if !ok {parse_error(p, "expected true or false"); return false}
-				switch val {
-				case "true":
-					free = true
-				case "false":
-					free = false
-				case:
-					parse_error(p, "free expects true or false, got %s", val)
-					return false
-				}
-			} else {
-				free = true
-			}
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
