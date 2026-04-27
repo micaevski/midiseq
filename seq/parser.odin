@@ -460,6 +460,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 	chance: i32 = 100
 	chan: i32 = target_timeline.channel
 	free: bool = auto_free
+	scale: Scale
 	for {
 		if at_line_end(p) do break
 
@@ -489,6 +490,13 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 			c, ok := parse_number(p)
 			if !ok {parse_error(p, "expected chance"); return false}
 			chance = i32(c)
+		case "scale":
+			if !has_value {parse_error(p, "scale requires '=value'"); return false}
+			tok, ok := parse_scale_token(p)
+			if !ok {parse_error(p, "expected scale name"); return false}
+			s, ok2 := parse_scale_name(tok)
+			if !ok2 {parse_error(p, "invalid scale name: %s", tok); return false}
+			scale = s
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
@@ -510,6 +518,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 				transposition = trans,
 				rate = rate,
 				free = free,
+				scale = scale,
 			},
 		},
 	)
@@ -826,6 +835,25 @@ parse_string_literal :: proc(p: ^Parser) -> (string, bool) {
 	return s, true
 }
 
+
+// Read a contiguous run of alpha characters and `#`. Used for scale
+// names ("C#M", "BbPm"); plain `parse_ident` rejects `#`.
+@(private)
+parse_scale_token :: proc(p: ^Parser) -> (string, bool) {
+	skip_inline_ws(p)
+	start := p.pos
+	for p.pos < len(p.src) {
+		c := p.src[p.pos]
+		if is_alpha(c) || c == '#' {
+			p.pos += 1
+			p.col += 1
+		} else {
+			break
+		}
+	}
+	if p.pos == start do return "", false
+	return p.src[start:p.pos], true
+}
 
 @(private)
 parse_ident :: proc(p: ^Parser) -> (string, bool) {

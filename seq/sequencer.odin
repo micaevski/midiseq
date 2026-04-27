@@ -31,6 +31,7 @@ Source_Timeline :: struct {
 	transposition: i32, // semitones
 	rate:          f32, // time-scale multiplier
 	free:          bool, // ref: spawn detaches from parent's lifecycle
+	scale:         Scale, // zero-value (None) means "no scale set"
 }
 
 Source_Kind :: union {
