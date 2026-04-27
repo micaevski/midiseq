@@ -25,16 +25,21 @@ import "core:strings"
 // sequencer (and so `adapt_to_source` doesn't need to know about the
 // parser at all).
 Parser :: struct {
-	source:      [dynamic]Source_Event,
-	names:       Names,
-	rng_state:   u32,
-	play_marked: [dynamic]Source_Index,
-
-	src:         string,
-	pos:         int,
-	line:        int,
-	col:         int,
+	source:    [dynamic]Source_Event,
+	names:     Names,
+	rng_state: u32,
+	src:       string,
+	pos:       int,
+	line:      int,
+	col:       int,
 }
+
+
+// The implicit global-scope timeline. Reserved as a label name; defining
+// a header with this name is a parse error. Lives in `names` so
+// adapt_to_source can remap it across reloads via the existing
+// name-keyed path.
+ROOT_NAME :: "__ROOT__"
 
 
 make_parser :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Parser {
@@ -42,14 +47,12 @@ make_parser :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Parser {
 	p := Parser{}
 	p.source = make_source_store(capacity)
 	p.names = make_names()
-	p.play_marked = make([dynamic]Source_Index, 0, 16)
 	return p
 }
 
 destroy_parser :: proc(p: ^Parser) {
 	delete(p.source)
 	destroy_names(&p.names)
-	delete(p.play_marked)
 	p^ = {}
 }
 
@@ -60,23 +63,27 @@ destroy_parser :: proc(p: ^Parser) {
 //
 // Grammar (line-oriented; one event per line):
 //
-//   IDENT [chan=N] :             // header — begins a top-level definition
+//   IDENT [chan=N] :             // header — opens a definition
 //   NOTE [time] [vel=V] [dur=D] [chance=C]    // note event (e.g. C4 0 dur=2)
 //   IDENT[!] [time] [trans=T] [rate=R] [chance=C]  // ref event (`!` = free)
 //   "path" [time]                // load notes from a MIDI file at `time`
 //
 //   SEED = N                     // optional directive
-//   @play                        // mark the next definition as a play target
 //   # ...                        // line comment
 //
-// `time` defaults to 0. Note names (C4, F#3, Ab-1, ...) are reserved
-// and cannot be used as label names.
+// The file's global scope is the implicit root timeline (named
+// `__ROOT__`); top-level event/ref lines become children of root and
+// fire as the root cursor reaches them. A header opens a definition
+// whose body is the following event lines, terminated by a blank line
+// (or another header at root scope). Nested definitions are not
+// allowed. To play a defined timeline, write its name as a ref at
+// global scope. `time` defaults to 0. Note names (C4, F#3, Ab-1, ...)
+// are reserved and cannot be used as label names.
 parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
 	// Wipe any leftovers from a previous parse (or from buffers we
 	// just received via swap on a previous successful reparse).
 	source_store_reset(&parser.source)
 	names_reset(&parser.names)
-	clear(&parser.play_marked)
 	parser.rng_state = 0
 
 	parser.src = src
@@ -84,78 +91,38 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	parser.line = 1
 	parser.col = 1
 
+	// Allocate the implicit root timeline up front. Both passes treat
+	// it as the parent of any line that isn't inside an open definition.
+	root = source_alloc(&parser.source)
+	if root == NIL_SOURCE {
+		parse_error(parser, "source storage full")
+		return NIL_SOURCE, false
+	}
+	root_event := source_get(&parser.source, root)
+	root_event.chance = 100
+	root_event.kind = Source_Timeline{rate = 1, channel = -1}
+	root_name, _ := strings.clone(ROOT_NAME, mem.arena_allocator(&parser.names.arena))
+	parser.names.lookup[root] = root_name
+	parser.names.by_name[root_name] = root
+
 	// Pass 1: discover every `IDENT:` header and reserve a Timeline
-	// event for it. Element calls are skipped by balancing parens.
+	// event for it.
 	if !pass_1(parser) do return NIL_SOURCE, false
 
 	// Pass 2: walk the source again. Each `IDENT:` rebinds the current
-	// parent; each element call is added to that parent.
+	// parent; each event line is added to that parent. A blank line
+	// pops back to root scope.
 	parser.pos = 0
 	parser.line = 1
 	parser.col = 1
-	last := pass_2(parser)
-	if last == NIL_SOURCE do return NIL_SOURCE, false
+	if !pass_2(parser, root) do return NIL_SOURCE, false
 
 	// Pass 3: every top-level body is populated now, so we can rewrite
 	// each reference's stashed target-index into the target's actual
 	// children chain head.
 	resolve_references(parser)
 
-	// Build the dummy root: a synthetic Source_Timeline whose children
-	// are LABEL(0)-style refs to every @play-marked def. If no
-	// markers were given, fall back to the last definition (legacy
-	// "last def is root" behavior).
-	root = build_dummy_root(parser, last)
-	if root == NIL_SOURCE do return NIL_SOURCE, false
-
 	return root, true
-}
-
-
-@(private)
-build_dummy_root :: proc(p: ^Parser, last_def: Source_Index) -> Source_Index {
-	dummy_idx := source_alloc(&p.source)
-	if dummy_idx == NIL_SOURCE {
-		parse_error(p, "source storage full")
-		return NIL_SOURCE
-	}
-	dummy := source_get(&p.source, dummy_idx)
-	dummy.chance = 100
-	dummy.kind = Source_Timeline{rate = 1, channel = -1}
-
-	targets := p.play_marked[:]
-	if len(targets) == 0 {
-		// Fallback: the last definition is the implicit play target.
-		targets = []Source_Index{last_def}
-	}
-
-	for target_idx in targets {
-		target := source_get(&p.source, target_idx)
-		target_top := target.kind.(Source_Timeline)
-		ref_idx := add_source_event(
-			&p.source,
-			dummy_idx,
-			Source_Event {
-				beat = 0,
-				chance = 100,
-				kind = Source_Timeline {
-					first = target_top.first,
-					channel = target_top.channel,
-					transposition = 0,
-					rate = 1,
-				},
-			},
-		)
-		if ref_idx != NIL_SOURCE {
-			// Carry the target's name onto the ref so adapt_to_source
-			// can match new dummy-root children against old ones by name.
-			if name, has_name := p.names.lookup[target_idx]; has_name {
-				p.names.lookup[ref_idx] = name
-			}
-		}
-	}
-
-	return dummy_idx
 }
 
 
@@ -192,28 +159,11 @@ resolve_references :: proc(p: ^Parser) {
 // `SEED = N` is consumed here.
 @(private)
 pass_1 :: proc(p: ^Parser) -> bool {
-	pending_play := false
 	for {
 		skip_ws(p)
 		if p.pos >= len(p.src) do break
 
 		c := p.src[p.pos]
-
-		// `@play` line — flag the next IDENT: header.
-		if c == '@' {
-			p.pos += 1
-			p.col += 1
-			anno, ok_a := parse_ident(p)
-			if !ok_a {parse_error(p, "expected annotation name after '@'"); return false}
-			switch anno {
-			case "play":
-				pending_play = true
-			case:
-				parse_error(p, "unknown annotation: @%s", anno)
-				return false
-			}
-			continue
-		}
 
 		// String-literal event ("path" [time]) — owned by pass_2.
 		if c == '"' {
@@ -230,6 +180,10 @@ pass_1 :: proc(p: ^Parser) -> bool {
 				parse_error(p, "SEED uses '=', not ':'")
 				return false
 			}
+			if name == ROOT_NAME {
+				parse_error(p, "%q is reserved as the implicit root name", ROOT_NAME)
+				return false
+			}
 			if is_note_name_string(name) {
 				parse_error(p, "note name %s cannot be used as a label", name)
 				return false
@@ -243,10 +197,6 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			top_event.chance = 100
 			top_event.kind = Source_Timeline{rate = 1, channel = -1}
 			p.names.by_name[name] = idx
-			if pending_play {
-				append(&p.play_marked, idx)
-				pending_play = false
-			}
 			if !parse_def_kwargs(p, idx) do return false
 			if !expect(p, ':') do return false
 			continue
@@ -283,62 +233,56 @@ pass_1 :: proc(p: ^Parser) -> bool {
 		// event-shaped line that pass_2 will validate.
 		skip_to_line_end(p)
 	}
-	if pending_play {
-		parse_error(p, "@play with no following label")
-		return false
-	}
 	return true
 }
 
 
-// Pass 2: walk the source again. Each header rebinds the current
-// parent; each event line is parsed and added to that parent. Refs
-// stash the target's index in their `first` field — `resolve_references`
-// rewrites it into the target's children-chain head once all bodies are
-// populated.
+// Pass 2: walk the source again. Each header at root scope rebinds the
+// current parent; each event line is parsed and added to the current
+// parent. A blank line pops back to root scope. Headers inside an open
+// definition are an error (no nesting). Refs stash the target's index
+// in their `first` field — `resolve_references` rewrites it into the
+// target's children-chain head once all bodies are populated.
 @(private)
-pass_2 :: proc(p: ^Parser) -> Source_Index {
-	last := NIL_SOURCE
-	current_parent := NIL_SOURCE
+pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
+	current_parent := root
 
 	for {
-		skip_ws(p)
+		// A blank line (two or more newlines spanning any combination
+		// of whitespace/comments) closes the open definition.
+		if skip_ws_track_blank(p) do current_parent = root
 		if p.pos >= len(p.src) do break
 
 		c := p.src[p.pos]
 
-		// `@anno` lines — consumed for their effect in pass_1.
-		if c == '@' {
-			p.pos += 1
-			p.col += 1
-			_, _ = parse_ident(p)
-			continue
-		}
-
 		// String-literal event: "path" [time]
 		if c == '"' {
-			if current_parent == NIL_SOURCE {
-				parse_error(p, "file event appears before any top-level definition")
-				return NIL_SOURCE
-			}
 			path, ok_s := parse_string_literal(p)
-			if !ok_s do return NIL_SOURCE
+			if !ok_s do return false
 			skip_inline_ws(p)
 			time: f32 = 0
 			if !at_line_end(p) {
 				v, ok := parse_number(p)
-				if !ok {parse_error(p, "expected time after path"); return NIL_SOURCE}
+				if !ok {parse_error(p, "expected time after path"); return false}
 				time = v
 			}
-			if !expect_line_end(p) do return NIL_SOURCE
-			if !load_midi_into(p, path, current_parent, time) do return NIL_SOURCE
+			if !expect_line_end(p) do return false
+			if !load_midi_into(p, path, current_parent, time) do return false
 			continue
 		}
 
 		// Header line.
 		if peek_line_has_colon(p) {
 			name, ok := parse_ident(p)
-			if !ok {parse_error(p, "expected identifier"); return NIL_SOURCE}
+			if !ok {parse_error(p, "expected identifier"); return false}
+			if current_parent != root {
+				parse_error(
+					p,
+					"nested definition '%s'; close the enclosing definition with a blank line first",
+					name,
+				)
+				return false
+			}
 			idx := p.names.by_name[name]
 			// Names from p.src are slices into the caller-owned source
 			// string and disappear once parsing is done; clone into the
@@ -348,32 +292,27 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 				name,
 				mem.arena_allocator(&p.names.arena),
 			)
-			if !parse_def_kwargs(p, idx) do return NIL_SOURCE
-			if !expect(p, ':') do return NIL_SOURCE
-			if !expect_line_end(p) do return NIL_SOURCE
+			if !parse_def_kwargs(p, idx) do return false
+			if !expect(p, ':') do return false
+			if !expect_line_end(p) do return false
 			current_parent = idx
-			last = idx
 			continue
 		}
 
 		// Event or SEED. Notes start with a note letter, and might
 		// otherwise look like an ident; try the note pattern first.
 		if num, is_note := try_parse_note_name(p); is_note {
-			if current_parent == NIL_SOURCE {
-				parse_error(p, "event before any top-level definition")
-				return NIL_SOURCE
-			}
-			if !parse_note_event(p, current_parent, num) do return NIL_SOURCE
+			if !parse_note_event(p, current_parent, num) do return false
 			continue
 		}
 
 		if !is_ident_start(c) {
 			parse_error(p, "unexpected character %c", rune(c))
-			return NIL_SOURCE
+			return false
 		}
 
 		name, ok := parse_ident(p)
-		if !ok {parse_error(p, "expected identifier"); return NIL_SOURCE}
+		if !ok {parse_error(p, "expected identifier"); return false}
 
 		if name == "SEED" {
 			skip_inline_ws(p)
@@ -385,7 +324,7 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 				continue
 			}
 			parse_error(p, "SEED requires '= N'")
-			return NIL_SOURCE
+			return false
 		}
 
 		// `NAME!` is shorthand for `NAME free=true`.
@@ -396,13 +335,9 @@ pass_2 :: proc(p: ^Parser) -> Source_Index {
 			auto_free = true
 		}
 
-		if current_parent == NIL_SOURCE {
-			parse_error(p, "event before any top-level definition")
-			return NIL_SOURCE
-		}
-		if !parse_ref_event(p, name, current_parent, auto_free) do return NIL_SOURCE
+		if !parse_ref_event(p, name, current_parent, auto_free) do return false
 	}
-	return last
+	return true
 }
 
 @(private)
@@ -695,6 +630,34 @@ skip_ws :: proc(p: ^Parser) {
 			return
 		}
 	}
+}
+
+// Like skip_ws, but reports whether a blank line was crossed (>= 2
+// newlines, optionally interleaved with horizontal whitespace and
+// comments). Pass_2 uses this to close a definition.
+@(private)
+skip_ws_track_blank :: proc(p: ^Parser) -> (crossed_blank: bool) {
+	newlines := 0
+	for p.pos < len(p.src) {
+		switch p.src[p.pos] {
+		case ' ', '\t', '\r', ',':
+			p.pos += 1
+			p.col += 1
+		case '\n':
+			p.pos += 1
+			p.line += 1
+			p.col = 1
+			newlines += 1
+		case '#':
+			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+				p.pos += 1
+				p.col += 1
+			}
+		case:
+			return newlines >= 2
+		}
+	}
+	return newlines >= 2
 }
 
 // Like skip_ws but stops at newlines.

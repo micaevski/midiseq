@@ -240,61 +240,6 @@ adapt_to_source :: proc(
 		}
 		current_index = event.active_next
 	}
-
-	//TODO: review this code. It is ablout hadnling the @play directives
-	old_played := make(map[string]bool, 16, context.temp_allocator)
-	if sequencer.source_root != NIL_SOURCE {
-		old_root_event := source_get(&sequencer.source, sequencer.source_root)
-		if t, ok := old_root_event.kind.(Source_Timeline); ok {
-			walker := t.first
-			for walker != NIL_SOURCE {
-				if name, has := sequencer.names.lookup[walker]; has {
-					old_played[name] = true
-				}
-				walker = source_get(&sequencer.source, walker).next
-			}
-		}
-	}
-
-	new_root_event := source_get(new_source, new_root)
-	new_top := new_root_event.kind.(Source_Timeline)
-	walker := new_top.first
-	for walker != NIL_SOURCE {
-		we := source_get(new_source, walker)
-		next_walker := we.next
-		ref_kind, is_ref := we.kind.(Source_Timeline)
-		if is_ref {
-			target_name, has_name := new_names.lookup[walker]
-			already_played := false
-			if has_name {
-				_, already_played = old_played[target_name]
-			}
-			if !already_played {
-				new_idx := runtime_alloc(&sequencer.runtime_pool)
-				if new_idx != NIL_RUNTIME {
-					re := runtime_get(&sequencer.runtime_pool, new_idx)
-					re.beat = sequencer.beat
-					re.active_next = NIL_RUNTIME
-					re.parent = NIL_RUNTIME
-					re.kind = Runtime_Timeline {
-						cursor        = ref_kind.first,
-						source_idx    = walker,
-						channel       = ref_kind.channel,
-						transposition = ref_kind.transposition,
-						rate          = ref_kind.rate,
-					}
-					if sequencer.active_tail == NIL_RUNTIME {
-						sequencer.active_head = new_idx
-					} else {
-						runtime_get(&sequencer.runtime_pool, sequencer.active_tail).active_next =
-							new_idx
-					}
-					sequencer.active_tail = new_idx
-				}
-			}
-		}
-		walker = next_walker
-	}
 }
 
 @(private)
@@ -372,7 +317,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 			parent_finished = parent_timeline.cursor == NIL_SOURCE
 		}
 
-		finished: bool
+		finished := false
 		switch k in event.kind {
 		case Runtime_Note:
 			if parent_finished do event.parent = NIL_RUNTIME
@@ -401,7 +346,12 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 					}
 					sequencer.active_tail = spawn_tail
 				}
-				finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE
+				// The root timeline runs forever: even when its cursor
+				// runs out, it stays in the active chain so a hot-reload
+				// can refill it with new global-scope events at future
+				// beats.
+				is_root := event.parent == NIL_RUNTIME && k.source_idx == sequencer.source_root
+				finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE && !is_root
 			}
 		}
 
