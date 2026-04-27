@@ -89,7 +89,8 @@ main :: proc() {
 	}
 	file_watcher_poll(&watcher) // prime: first poll always returns true
 
-	rl.InitWindow(900, 760, "midiseq")
+	rl.SetConfigFlags({.WINDOW_RESIZABLE})
+	rl.InitWindow(1400, 1000, "midiseq")
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(120)
 
@@ -161,9 +162,16 @@ main :: proc() {
 			240,
 		)
 
-		draw_beat_counter(sequencer.beat, rl.Rectangle{700, 20, 180, 100})
+		// Dashboard occupies the top DASHBOARD_H px and stays fixed; the
+		// viz area below stretches with the window.
+		DASHBOARD_H :: f32(160)
+		BEAT_W :: f32(180)
+		screen_w := f32(rl.GetScreenWidth())
+		screen_h := f32(rl.GetScreenHeight())
 
-		viz_area := rl.Rectangle{20, 160, 860, 580}
+		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 20, BEAT_W, 100})
+
+		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - 20}
 		if show_debug {
 			debug_draw_source(&sequencer, viz_area)
 		} else {

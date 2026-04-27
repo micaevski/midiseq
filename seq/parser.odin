@@ -755,9 +755,7 @@ peek_line_has_colon :: proc(p: ^Parser) -> bool {
 @(private)
 is_note_name_string :: proc(s: string) -> bool {
 	if len(s) == 0 do return false
-	upper := s[0]
-	if upper >= 'a' && upper <= 'z' do upper -= 'a' - 'A'
-	if !(upper >= 'A' && upper <= 'G') do return false
+	if _, ok := note_letter_base(s[0]); !ok do return false
 	pos := 1
 	if pos < len(s) && s[pos] == 'b' do pos += 1
 	if pos < len(s) && s[pos] == '-' do pos += 1
@@ -772,31 +770,12 @@ is_note_name_string :: proc(s: string) -> bool {
 @(private)
 try_parse_note_name :: proc(p: ^Parser) -> (i32, bool) {
 	if p.pos >= len(p.src) do return 0, false
-	c := p.src[p.pos]
-	upper := c
-	if upper >= 'a' && upper <= 'z' do upper -= 'a' - 'A'
-	if !(upper >= 'A' && upper <= 'G') do return 0, false
+	base, ok := note_letter_base(p.src[p.pos])
+	if !ok do return 0, false
 
 	save_pos := p.pos
 	save_col := p.col
 
-	base: i32
-	switch upper {
-	case 'C':
-		base = 0
-	case 'D':
-		base = 2
-	case 'E':
-		base = 4
-	case 'F':
-		base = 5
-	case 'G':
-		base = 7
-	case 'A':
-		base = 9
-	case 'B':
-		base = 11
-	}
 	p.pos += 1
 	p.col += 1
 
