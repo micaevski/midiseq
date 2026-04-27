@@ -1,11 +1,43 @@
-BASS:
-note(0 C3 vel=50)
-note(4 E3 vel=30)
-BASS(7)
+BASS chan=2:
+C3  0   vel=100
+G3  1.5 vel=30
+F4  3   vel=30
+BASS! 4 
 
-#FJ: "FJ.mid"
+CHORD chan=1:
+C4 dur=2 vel=30
+E4 dur=2 vel=30
+G4 dur=2 vel=30
+CHORD! 4 
+
+DRUMS   chan=3:
+KICKS   
+SNARES
+HATS   
+DRUMS! 4    
+
+KICKS:
+C2
+KICKS! 1 
+
+HATS:
+C4  0.5 
+C4  0.27 vel=10 chance=50
+HATS! 1
+
+SNARES: 
+A2 1 
+A2 3
+A2 3.5 chance=40
+
+FJ chan=4:
+"FJ.mid"
 
 @play
-PART: 
-BASS(0)
-PART(5)
+SONG:
+DRUMS
+FJ
+FJ 4
+#CHORD
+BASS
+SONG! 32 
