@@ -108,13 +108,24 @@ debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle)
 
 	switch k in e.kind {
 	case seq.Note:
-		ui_draw_text(
-			fmt.ctprintf("n=%d  v=%d  beat=%.2f", k.number, k.velocity, e.beat),
-			i32(r.x) + 12,
-			i32(r.y) + 32,
-			14,
-			rl.LIGHTGRAY,
-		)
+		text: cstring
+		if k.number.is_degree {
+			text = fmt.ctprintf(
+				"P%dO%d  v=%d  beat=%.2f",
+				k.number.pitch,
+				k.number.octave,
+				k.velocity,
+				e.beat,
+			)
+		} else {
+			text = fmt.ctprintf(
+				"n=%d  v=%d  beat=%.2f",
+				k.number.pitch,
+				k.velocity,
+				e.beat,
+			)
+		}
+		ui_draw_text(text, i32(r.x) + 12, i32(r.y) + 32, 14, rl.LIGHTGRAY)
 	case seq.Source_Timeline:
 		ui_draw_text(
 			fmt.ctprintf(

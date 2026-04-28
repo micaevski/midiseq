@@ -59,6 +59,20 @@ Transposition :: struct {
 
 SCALE_NAME_HELP :: "format <root><kind>, root A-G with optional # or b, kind one of M (major), m (minor), PM (pent major), Pm (pent minor); e.g. CM, F#m, BbPM, EbPm"
 
+
+degree_to_midi :: proc(degree, octave: i32, scale: Scale) -> i32 {
+	offsets := scale_offsets(scale.kind)
+	size := i32(len(offsets))
+	if size == 0 {
+		return (octave + 1) * 12 + (degree - 1)
+	}
+	octave_offset := floor_div(degree - 1, size)
+	degree_idx := mod_pos(degree - 1, size)
+	final_octave := octave + octave_offset
+	pitch_class := mod_pos(scale.root + offsets[degree_idx], 12)
+	return (final_octave + 1) * 12 + pitch_class
+}
+
 // Scale-degree offsets in semitones from the scale's root, in ascending
 // order. The first offset is always 0; the last is < 12.
 @(private)

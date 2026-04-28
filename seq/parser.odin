@@ -208,7 +208,7 @@ pass_1 :: proc(p: ^Parser) -> bool {
 				parse_error(p, "%q is reserved as the implicit root name", ROOT_NAME)
 				return false
 			}
-			if is_note_name_string(name) {
+			if is_note_name_string(name) || is_degree_note_name_string(name) {
 				parse_error(p, "note name %s cannot be used as a label", name)
 				return false
 			}
@@ -329,6 +329,10 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 			if !parse_note_event(p, current_parent, num) do return false
 			continue
 		}
+		if deg, oct, is_deg := try_parse_degree_note(p); is_deg {
+			if !parse_degree_note_event(p, current_parent, deg, oct) do return false
+			continue
+		}
 
 		if !is_ident_start(c) {
 			parse_error(p, "unexpected character %c", rune(c))
@@ -402,7 +406,7 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 				beat = quantize(n.start_beat + time),
 				chance = NOTE_DEFAULT_CHANCE,
 				kind = Note {
-					number = n.number,
+					number = Note_Number{pitch = n.number, is_degree = false},
 					velocity = n.velocity,
 					duration = max(quantize(n.duration), BEAT_QUANTUM),
 				},
@@ -617,7 +621,68 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
 			beat = quantize(beat),
 			chance = chance,
 			kind = Note {
-				number = pitch,
+				number = Note_Number{pitch = pitch, is_degree = false},
+				velocity = vel,
+				duration = max(quantize(dur), BEAT_QUANTUM),
+			},
+		},
+	)
+	return true
+}
+
+
+@(private)
+parse_degree_note_event :: proc(
+	p: ^Parser,
+	parent: Source_Index,
+	degree, octave: i32,
+) -> bool {
+	skip_inline_ws(p)
+	beat: f32 = 0
+	if !at_line_end(p) && !is_kwarg_start(p) {
+		v, ok := parse_number(p)
+		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		beat = v
+	}
+
+	vel: i32 = NOTE_DEFAULT_VELOCITY
+	dur: f32 = NOTE_DEFAULT_DURATION
+	chance: i32 = NOTE_DEFAULT_CHANCE
+
+	for {
+		if at_line_end(p) do break
+
+		arg_name, ok_a := parse_ident(p)
+		if !ok_a {parse_error(p, "expected argument name"); return false}
+		if !expect(p, '=') do return false
+
+		switch arg_name {
+		case "vel":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected velocity"); return false}
+			vel = i32(v)
+		case "dur":
+			d, ok := parse_number(p)
+			if !ok {parse_error(p, "expected duration"); return false}
+			dur = d
+		case "chance":
+			c, ok := parse_number(p)
+			if !ok {parse_error(p, "expected chance"); return false}
+			chance = i32(c)
+		case:
+			parse_error(p, "unknown note argument: %s", arg_name)
+			return false
+		}
+	}
+
+	add_source_event(
+		&p.source,
+		parent,
+		Source_Event {
+			beat = quantize(beat),
+			chance = chance,
+			kind = Note {
+				number = Note_Number{pitch = degree, octave = octave, is_degree = true},
 				velocity = vel,
 				duration = max(quantize(dur), BEAT_QUANTUM),
 			},
@@ -765,9 +830,80 @@ is_note_name_string :: proc(s: string) -> bool {
 	return pos == len(s)
 }
 
+
+@(private)
+is_degree_note_name_string :: proc(s: string) -> bool {
+	if len(s) < 2 do return false
+	if s[0] != 'P' && s[0] != 'p' do return false
+	pos := 1
+	if !is_digit(s[pos]) do return false
+	for pos < len(s) && is_digit(s[pos]) do pos += 1
+	if pos == len(s) do return true
+	if s[pos] != 'O' && s[pos] != 'o' do return false
+	pos += 1
+	if pos >= len(s) || !is_digit(s[pos]) do return false
+	for pos < len(s) && is_digit(s[pos]) do pos += 1
+	return pos == len(s)
+}
+
 // Try to consume a note name at the current position. On success
 // advances `p` and returns the MIDI number; on failure restores `p`
 // and returns false (no error emitted).
+@(private)
+try_parse_degree_note :: proc(p: ^Parser) -> (degree, octave: i32, ok: bool) {
+	if p.pos >= len(p.src) do return 0, 0, false
+	c := p.src[p.pos]
+	if c != 'P' && c != 'p' do return 0, 0, false
+
+	save_pos := p.pos
+	save_col := p.col
+
+	p.pos += 1
+	p.col += 1
+
+	if p.pos >= len(p.src) || !is_digit(p.src[p.pos]) {
+		p.pos = save_pos
+		p.col = save_col
+		return 0, 0, false
+	}
+
+	deg: i32 = 0
+	for p.pos < len(p.src) && is_digit(p.src[p.pos]) {
+		deg = deg * 10 + i32(p.src[p.pos] - '0')
+		p.pos += 1
+		p.col += 1
+	}
+
+	oct: i32 = 3
+	if p.pos < len(p.src) && (p.src[p.pos] == 'O' || p.src[p.pos] == 'o') {
+		p.pos += 1
+		p.col += 1
+		if p.pos >= len(p.src) || !is_digit(p.src[p.pos]) {
+			p.pos = save_pos
+			p.col = save_col
+			return 0, 0, false
+		}
+		oct = 0
+		for p.pos < len(p.src) && is_digit(p.src[p.pos]) {
+			oct = oct * 10 + i32(p.src[p.pos] - '0')
+			p.pos += 1
+			p.col += 1
+		}
+	}
+
+	if p.pos < len(p.src) {
+		c2 := p.src[p.pos]
+		if is_alpha(c2) || c2 == '_' || is_digit(c2) {
+			p.pos = save_pos
+			p.col = save_col
+			return 0, 0, false
+		}
+	}
+
+	return deg, oct, true
+}
+
+
 @(private)
 try_parse_note_name :: proc(p: ^Parser) -> (i32, bool) {
 	if p.pos >= len(p.src) do return 0, false

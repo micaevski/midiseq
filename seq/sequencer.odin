@@ -19,8 +19,14 @@ quantize :: proc(t: f32) -> f32 {
 	return math.round(t * f32(STEPS_PER_BEAT)) / f32(STEPS_PER_BEAT)
 }
 
+Note_Number :: bit_field u32 {
+	pitch:     i32  | 16,
+	octave:    i32  | 8,
+	is_degree: bool | 8,
+}
+
 Note :: struct {
-	number:   i32, // MIDI note, 0..127
+	number:   Note_Number,
 	velocity: i32, // 0..127
 	duration: f32, // in beats; note-off fires at start_beat + duration
 }
@@ -458,7 +464,13 @@ play_timeline :: proc(
 		case Note:
 			chan := timeline.channel
 			if chan == -1 do chan = 0
-			num := k.number + i32(timeline.transposition.semitones)
+			raw: i32
+			if k.number.is_degree {
+				raw = degree_to_midi(k.number.pitch, k.number.octave, timeline.scale)
+			} else {
+				raw = k.number.pitch
+			}
+			num := raw + i32(timeline.transposition.semitones)
 			if timeline.transposition.degrees != 0 {
 				num = shift_in_scale(
 					num,
