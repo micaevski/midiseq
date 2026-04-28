@@ -1,11 +1,13 @@
 package main
 
 import "core:fmt"
+import "core:mem"
 import "seq"
 import rl "vendor:raylib"
 
 
 SONG_PATH :: "song.midiseq"
+TEMP_ARENA_BYTES :: 1 * 1024 * 1024
 
 
 draw_beat_counter :: proc(beat: f32, area: rl.Rectangle) {
@@ -67,6 +69,12 @@ try_start_sequencer :: proc(s: ^seq.Sequencer) {
 
 
 main :: proc() {
+	temp_buf := make([]byte, TEMP_ARENA_BYTES)
+	defer delete(temp_buf)
+	temp_arena: mem.Arena
+	mem.arena_init(&temp_arena, temp_buf)
+	context.temp_allocator = mem.arena_allocator(&temp_arena)
+
 	midi: Midi_Out
 	if !midi_open(&midi) do return
 	defer midi_close(&midi)
