@@ -88,9 +88,9 @@ parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bo
 //
 // Grammar (line-oriented; one event per line):
 //
-//   IDENT [chan=N] :             // header — opens a definition
+//   IDENT :                                   // header — opens a definition
 //   NOTE [time] [vel=V] [dur=D] [chance=C]    // note event (e.g. C4 0 dur=2)
-//   IDENT[!] [time] [trans=T] [rate=R] [chance=C]  // ref event (`!` = free)
+//   IDENT[!] [time] [trans=T] [rate=R] [chance=C] [chan=N] [scale=S]  // ref
 //   "path" [time]                // load notes from a MIDI file at `time`
 //
 //   SEED = N                     // optional directive
@@ -224,7 +224,6 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			top_event.chance = 100
 			top_event.kind = Source_Timeline{rate = 1, channel = -1}
 			p.names.by_name[name] = idx
-			if !parse_def_kwargs(p, idx) do return false
 			if !expect(p, ':') do return false
 			continue
 		}
@@ -319,7 +318,6 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 				name,
 				mem.arena_allocator(&p.names.arena),
 			)
-			if !parse_def_kwargs(p, idx) do return false
 			if !expect(p, ':') do return false
 			if !expect_line_end(p) do return false
 			current_parent = idx
@@ -420,47 +418,6 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 }
 
 
-// IDENT [kwarg=value]* :  — kwargs that customize the def's Source_Timeline.
-// Stops at the first `:`. The caller consumes the colon.
-@(private)
-parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
-	for {
-		skip_inline_ws(p)
-		if p.pos >= len(p.src) || p.src[p.pos] == '\n' {
-			parse_error(p, "header missing ':'")
-			return false
-		}
-		if p.src[p.pos] == ':' do break
-
-		arg_name, ok := parse_ident(p)
-		if !ok {
-			parse_error(p, "expected argument name or ':'")
-			return false
-		}
-		if !expect(p, '=') do return false
-
-		ev := source_get(&p.source, def_idx)
-		t := &ev.kind.(Source_Timeline)
-
-		switch arg_name {
-		case "chan":
-			v, vok := parse_number(p)
-			if !vok {parse_error(p, "expected channel"); return false}
-			ch := i32(v)
-			if ch < 1 || ch > 16 {
-				parse_error(p, "channel must be 1..16, got %d", ch)
-				return false
-			}
-			t.channel = i8(ch - 1)
-		case:
-			parse_error(p, "unknown definition argument: %s", arg_name)
-			return false
-		}
-	}
-	return true
-}
-
-
 // IDENT[!] [time] [trans=T] [rate=R] [chance=C]
 // `name` has already been consumed; we're sitting after it (and any `!`)
 // on the line. `auto_free` reflects whether `!` was present.
@@ -487,7 +444,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 	trans: Transposition
 	rate: f32 = 1
 	chance: i32 = 100
-	chan: i32 = i32(target_timeline.channel)
+	chan: i32 = -1
 	free: bool = auto_free
 	scale: Scale
 	for {
@@ -533,6 +490,16 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 			s, ok2 := parse_scale_name(tok)
 			if !ok2 {parse_error(p, "invalid scale name: %s (%s)", tok, SCALE_NAME_HELP); return false}
 			scale = s
+		case "chan":
+			if !has_value {parse_error(p, "chan requires '=value'"); return false}
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected channel"); return false}
+			ch := i32(v)
+			if ch < 1 || ch > 16 {
+				parse_error(p, "channel must be 1..16, got %d", ch)
+				return false
+			}
+			chan = ch - 1
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
