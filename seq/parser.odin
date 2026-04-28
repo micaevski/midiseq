@@ -749,27 +749,31 @@ skip_ws :: proc(p: ^Parser) {
 // comments). Pass_2 uses this to close a definition.
 @(private)
 skip_ws_track_blank :: proc(p: ^Parser) -> (crossed_blank: bool) {
-	newlines := 0
+	prev_was_newline := false
+	line_empty := true
 	for p.pos < len(p.src) {
 		switch p.src[p.pos] {
 		case ' ', '\t', '\r', ',':
 			p.pos += 1
 			p.col += 1
 		case '\n':
+			if line_empty && prev_was_newline do crossed_blank = true
 			p.pos += 1
 			p.line += 1
 			p.col = 1
-			newlines += 1
+			prev_was_newline = true
+			line_empty = true
 		case '#':
+			line_empty = false
 			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
 				p.pos += 1
 				p.col += 1
 			}
 		case:
-			return newlines >= 2
+			return
 		}
 	}
-	return newlines >= 2
+	return
 }
 
 // Like skip_ws but stops at newlines.
