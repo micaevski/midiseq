@@ -28,7 +28,7 @@ Note :: struct {
 Source_Timeline :: struct {
 	first:         Source_Index,
 	channel:       i32,
-	transposition: i32, // semitones
+	transposition: Transposition,
 	rate:          f32, // time-scale multiplier
 	free:          bool, // ref: spawn detaches from parent's lifecycle
 	scale:         Scale, // zero-value (None) means "no scale set"
@@ -58,8 +58,9 @@ Runtime_Timeline :: struct {
 	cursor:        Source_Index,
 	source_idx:    Source_Index,
 	channel:       i32,
-	transposition: i32,
+	transposition: Transposition,
 	rate:          f32,
+	scale:         Scale,
 }
 
 Runtime_Kind :: union {
@@ -293,6 +294,7 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 		channel       = source_timeline.channel,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
+		scale         = source_timeline.scale,
 	}
 	root_event.active_next = NIL_RUNTIME
 	root_event.parent = NIL_RUNTIME
@@ -348,9 +350,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 					sequencer.active_tail = spawn_tail
 				}
 				// The root timeline runs forever: even when its cursor
-				// runs out, it stays in the active chain so a hot-reload
-				// can refill it with new global-scope events at future
-				// beats.
+				// runs out.
 				is_root := event.parent == NIL_RUNTIME && k.source_idx == sequencer.source_root
 				finished = event.kind.(Runtime_Timeline).cursor == NIL_SOURCE && !is_root
 			}
@@ -458,7 +458,15 @@ play_timeline :: proc(
 		case Note:
 			chan := timeline.channel
 			if chan == -1 do chan = 0
-			num := k.number + timeline.transposition
+			num := k.number + i32(timeline.transposition.semitones)
+			if timeline.transposition.degrees != 0 {
+				num = shift_in_scale(
+					num,
+					i32(timeline.transposition.degrees),
+					timeline.scale.root,
+					scale_offsets(timeline.scale.kind),
+				)
+			}
 			duration := max(quantize(k.duration / timeline.rate), BEAT_QUANTUM)
 			runtime_event.kind = Runtime_Note {
 				number            = num,
@@ -477,12 +485,18 @@ play_timeline :: proc(
 			if k.free do runtime_event.parent = timeline_event.parent
 			child_channel := k.channel
 			if timeline.channel != -1 do child_channel = timeline.channel
+			child_scale := k.scale
+			if child_scale.kind == .None do child_scale = timeline.scale
 			runtime_event.kind = Runtime_Timeline {
-				cursor        = k.first,
-				source_idx    = timeline.cursor,
-				channel       = child_channel,
-				transposition = k.transposition + timeline.transposition,
-				rate          = k.rate * timeline.rate,
+				cursor = k.first,
+				source_idx = timeline.cursor,
+				channel = child_channel,
+				transposition = Transposition {
+					semitones = k.transposition.semitones + timeline.transposition.semitones,
+					degrees = k.transposition.degrees + timeline.transposition.degrees,
+				},
+				rate = k.rate * timeline.rate,
+				scale = child_scale,
 			}
 		}
 		if timeline.source_idx == sequencer.source_root {

@@ -50,6 +50,16 @@ Scale :: struct {
 	root: i32,
 }
 
+
+// Pitch-shift quantity carried by a Source_Timeline / Runtime_Timeline.
+// Both fields accumulate additively as the timeline tree spawns. At
+// note-spawn time, semitones are applied first (raw +/-), then degrees
+// are applied through the parent timeline's scale via shift_in_scale.
+Transposition :: struct {
+	semitones: i16,
+	degrees:   i16,
+}
+
 // Scale-degree offsets in semitones from the scale's root, in ascending
 // order. The first offset is always 0; the last is < 12.
 @(private)

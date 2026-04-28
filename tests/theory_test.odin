@@ -1,7 +1,7 @@
 package tests
 
-import "core:testing"
 import "../seq"
+import "core:testing"
 
 
 @(test)
@@ -166,7 +166,26 @@ test_shift_in_scale_a_major :: proc(t: ^testing.T) {
 
 
 @(test)
-test_shift_in_scale_pentatonic :: proc(t: ^testing.T) {
+test_shift_in_scale_e_minor :: proc(t: ^testing.T) {
+	em := seq.scale_offsets(.Minor)
+	root := i32(4) // E
+
+	// E minor: E F# G A B C D.
+	testing.expect_value(t, seq.shift_in_scale(64, 1, root, em), i32(66)) // E4 +1 = F#4
+	testing.expect_value(t, seq.shift_in_scale(64, 2, root, em), i32(67)) // E4 +2 = G4
+	testing.expect_value(t, seq.shift_in_scale(64, 7, root, em), i32(76)) // +full scale-octave
+	testing.expect_value(t, seq.shift_in_scale(64, -1, root, em), i32(62)) // E4 -1 = D4
+
+	// F4 (65) is between E and F# in Em → rounds down to E (degree 0).
+	testing.expect_value(t, seq.shift_in_scale(65, 1, root, em), i32(66))
+
+	// D5 (74) +1 → E5 (top wrap, degree 6 → 7 mod 7 = 0 next octave).
+	testing.expect_value(t, seq.shift_in_scale(74, 1, root, em), i32(76))
+}
+
+
+@(test)
+test_shift_in_scale_pentatonic_major :: proc(t: ^testing.T) {
 	pm := seq.scale_offsets(.Pent_Major)
 
 	// CPM: C D E G A (offsets 0, 2, 4, 7, 9). Five degrees per octave.
@@ -177,6 +196,25 @@ test_shift_in_scale_pentatonic :: proc(t: ^testing.T) {
 
 	// F4 (65) is not in CPM; rounds down to E (degree 2). +1 → G (degree 3).
 	testing.expect_value(t, seq.shift_in_scale(65, 1, 0, pm), i32(67))
+}
+
+
+@(test)
+test_shift_in_scale_pentatonic_minor :: proc(t: ^testing.T) {
+	pm := seq.scale_offsets(.Pent_Minor)
+	root := i32(9) // A
+
+	// A pent minor: A C D E G (offsets 0, 3, 5, 7, 10 from root A).
+	testing.expect_value(t, seq.shift_in_scale(69, 1, root, pm), i32(72)) // A4 +1 = C5
+	testing.expect_value(t, seq.shift_in_scale(69, 4, root, pm), i32(79)) // A4 +4 = G5
+	testing.expect_value(t, seq.shift_in_scale(69, 5, root, pm), i32(81)) // +full pent-octave
+	testing.expect_value(t, seq.shift_in_scale(72, -1, root, pm), i32(69)) // C5 -1 = A4
+
+	// B4 (71) is not in APm; rounds down to A (degree 0). +1 → C5.
+	testing.expect_value(t, seq.shift_in_scale(71, 1, root, pm), i32(72))
+
+	// G5 (79) +1 → A5 (top wrap, degree 4 → 5 mod 5 = 0 next octave).
+	testing.expect_value(t, seq.shift_in_scale(79, 1, root, pm), i32(81))
 }
 
 

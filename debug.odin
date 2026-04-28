@@ -117,7 +117,13 @@ debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle)
 		)
 	case seq.Source_Timeline:
 		ui_draw_text(
-			fmt.ctprintf("trans=%d  rate=%.1f  beat=%.2f", k.transposition, k.rate, e.beat),
+			fmt.ctprintf(
+				"trans=%d/%dd  rate=%.1f  beat=%.2f",
+				k.transposition.semitones,
+				k.transposition.degrees,
+				k.rate,
+				e.beat,
+			),
 			i32(r.x) + 12,
 			i32(r.y) + 32,
 			14,

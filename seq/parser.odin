@@ -455,7 +455,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 		beat = v
 	}
 
-	trans: i32 = 0
+	trans: Transposition
 	rate: f32 = 1
 	chance: i32 = 100
 	chan: i32 = target_timeline.channel
@@ -479,7 +479,14 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 			if !has_value {parse_error(p, "trans requires '=value'"); return false}
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected transposition"); return false}
-			trans = i32(v)
+			// `trans=2d` writes scale degrees; `trans=2` writes semitones.
+			if p.pos < len(p.src) && p.src[p.pos] == 'd' {
+				p.pos += 1
+				p.col += 1
+				trans.degrees = i16(v)
+			} else {
+				trans.semitones = i16(v)
+			}
 		case "rate":
 			if !has_value {parse_error(p, "rate requires '=value'"); return false}
 			v, ok := parse_number(p)
