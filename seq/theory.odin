@@ -47,7 +47,7 @@ Scale_Kind :: enum u8 {
 // Zero-value (`{None, 0}`) means "no scale set".
 Scale :: struct {
 	kind: Scale_Kind,
-	root: i32,
+	root: u8,
 }
 
 
@@ -69,7 +69,7 @@ degree_to_midi :: proc(degree, octave: i32, scale: Scale) -> i32 {
 	octave_offset := floor_div(degree - 1, size)
 	degree_idx := mod_pos(degree - 1, size)
 	final_octave := octave + octave_offset
-	pitch_class := mod_pos(scale.root + offsets[degree_idx], 12)
+	pitch_class := mod_pos(i32(scale.root) + offsets[degree_idx], 12)
 	return (final_octave + 1) * 12 + pitch_class
 }
 
@@ -209,5 +209,5 @@ parse_scale_name :: proc(s: string) -> (Scale, bool) {
 	case:
 		return {}, false
 	}
-	return Scale{kind = kind, root = base}, true
+	return Scale{kind = kind, root = u8(base)}, true
 }

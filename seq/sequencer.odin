@@ -27,7 +27,7 @@ Note_Number :: bit_field u32 {
 	is_degree: bool | 1,
 }
 
-Note :: struct {
+Source_Note :: struct {
 	number:   Note_Number,
 	velocity: i32, // 0..127
 	duration: f32, // in beats; note-off fires at start_beat + duration
@@ -35,15 +35,15 @@ Note :: struct {
 
 Source_Timeline :: struct {
 	first:         Source_Index,
-	channel:       i32,
 	transposition: Transposition,
 	rate:          f32, // time-scale multiplier
-	free:          bool, // ref: spawn detaches from parent's lifecycle
 	scale:         Scale, // zero-value (None) means "no scale set"
+	channel:       i8,
+	free:          bool, // ref: spawn detaches from parent's lifecycle
 }
 
 Source_Kind :: union {
-	Note,
+	Source_Note,
 	Source_Timeline,
 }
 
@@ -65,10 +65,10 @@ Runtime_Note :: struct {
 Runtime_Timeline :: struct {
 	cursor:        Source_Index,
 	source_idx:    Source_Index,
-	channel:       i32,
 	transposition: Transposition,
 	rate:          f32,
 	scale:         Scale,
+	channel:       u8,
 }
 
 Runtime_Kind :: union {
@@ -296,10 +296,12 @@ start :: proc(sequencer: ^Sequencer) {
 	root_idx := runtime_alloc(&sequencer.runtime_pool)
 	root_event := runtime_get(&sequencer.runtime_pool, root_idx)
 	root_event.beat = 0
+	root_channel: u8 = 0
+	if source_timeline.channel != -1 do root_channel = u8(source_timeline.channel)
 	root_event.kind = Runtime_Timeline {
 		cursor        = source_timeline.first,
 		source_idx    = sequencer.source_root,
-		channel       = source_timeline.channel,
+		channel       = root_channel,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
 		scale         = source_timeline.scale,
@@ -483,15 +485,14 @@ play_timeline :: proc(
 		runtime_event.parent = timeline_event_idx
 
 		switch k in cursor_event.kind {
-		case Note:
-			chan := timeline.channel
-			if chan == -1 do chan = 0
+		case Source_Note:
+			chan := i32(timeline.channel)
 			raw := resolve_note_pitch(k.number, timeline.scale, &sequencer.rng_state)
 			num := raw + i32(timeline.transposition.semitones)
 			num = shift_in_scale(
 				num,
 				i32(timeline.transposition.degrees),
-				timeline.scale.root,
+				i32(timeline.scale.root),
 				scale_offsets(timeline.scale.kind),
 			)
 			duration := max(quantize(k.duration / timeline.rate), BEAT_QUANTUM)
@@ -510,8 +511,8 @@ play_timeline :: proc(
 			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity)
 		case Source_Timeline:
 			if k.free do runtime_event.parent = timeline_event.parent
-			child_channel := k.channel
-			if child_channel == -1 do child_channel = timeline.channel
+			child_channel: u8 = timeline.channel
+			if k.channel != -1 do child_channel = u8(k.channel)
 			child_scale := k.scale
 			if child_scale.kind == .None do child_scale = timeline.scale
 			runtime_event.kind = Runtime_Timeline {

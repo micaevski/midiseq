@@ -107,7 +107,7 @@ debug_draw_cell :: proc(sequencer: ^seq.Sequencer, idx: i32, area: rl.Rectangle)
 	)
 
 	switch k in e.kind {
-	case seq.Note:
+	case seq.Source_Note:
 		text: cstring
 		ranged := k.number.pitch1 != k.number.pitch2 || k.number.octave1 != k.number.octave2
 		if k.number.is_degree {

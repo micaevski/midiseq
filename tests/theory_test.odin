@@ -66,32 +66,32 @@ test_parse_scale_name :: proc(t: ^testing.T) {
 	s, ok := seq.parse_scale_name("CM")
 	testing.expect(t, ok)
 	testing.expect_value(t, s.kind, seq.Scale_Kind.Major)
-	testing.expect_value(t, s.root, i32(0))
+	testing.expect_value(t, s.root, u8(0))
 
 	s, ok = seq.parse_scale_name("Am")
 	testing.expect(t, ok)
 	testing.expect_value(t, s.kind, seq.Scale_Kind.Minor)
-	testing.expect_value(t, s.root, i32(9))
+	testing.expect_value(t, s.root, u8(9))
 
 	s, ok = seq.parse_scale_name("F#PM")
 	testing.expect(t, ok)
 	testing.expect_value(t, s.kind, seq.Scale_Kind.Pent_Major)
-	testing.expect_value(t, s.root, i32(6))
+	testing.expect_value(t, s.root, u8(6))
 
 	s, ok = seq.parse_scale_name("BbPm")
 	testing.expect(t, ok)
 	testing.expect_value(t, s.kind, seq.Scale_Kind.Pent_Minor)
-	testing.expect_value(t, s.root, i32(10))
+	testing.expect_value(t, s.root, u8(10))
 
 	// Cb wraps to B (pitch class 11).
 	s, ok = seq.parse_scale_name("Cbm")
 	testing.expect(t, ok)
-	testing.expect_value(t, s.root, i32(11))
+	testing.expect_value(t, s.root, u8(11))
 
 	// case-insensitive root letter.
 	s, ok = seq.parse_scale_name("cM")
 	testing.expect(t, ok)
-	testing.expect_value(t, s.root, i32(0))
+	testing.expect_value(t, s.root, u8(0))
 
 	// Invalid: unknown suffix.
 	_, ok = seq.parse_scale_name("CMx")

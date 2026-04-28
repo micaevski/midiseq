@@ -408,7 +408,7 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 			Source_Event {
 				beat = quantize(n.start_beat + time),
 				chance = NOTE_DEFAULT_CHANCE,
-				kind = Note {
+				kind = Source_Note {
 					number = Note_Number{pitch1 = u8(n.number), pitch2 = u8(n.number), is_degree = false},
 					velocity = n.velocity,
 					duration = max(quantize(n.duration), BEAT_QUANTUM),
@@ -451,7 +451,7 @@ parse_def_kwargs :: proc(p: ^Parser, def_idx: Source_Index) -> bool {
 				parse_error(p, "channel must be 1..16, got %d", ch)
 				return false
 			}
-			t.channel = ch - 1
+			t.channel = i8(ch - 1)
 		case:
 			parse_error(p, "unknown definition argument: %s", arg_name)
 			return false
@@ -487,7 +487,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 	trans: Transposition
 	rate: f32 = 1
 	chance: i32 = 100
-	chan: i32 = target_timeline.channel
+	chan: i32 = i32(target_timeline.channel)
 	free: bool = auto_free
 	scale: Scale
 	for {
@@ -550,7 +550,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 			chance = chance,
 			kind = Source_Timeline {
 				first = target,
-				channel = chan,
+				channel = i8(chan),
 				transposition = trans,
 				rate = rate,
 				free = free,
@@ -623,7 +623,7 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, lo, hi: i32) -> bool 
 		Source_Event {
 			beat = quantize(beat),
 			chance = chance,
-			kind = Note {
+			kind = Source_Note {
 				number = Note_Number{pitch1 = u8(lo), pitch2 = u8(hi), is_degree = false},
 				velocity = vel,
 				duration = max(quantize(dur), BEAT_QUANTUM),
@@ -684,7 +684,7 @@ parse_degree_note_event :: proc(
 		Source_Event {
 			beat = quantize(beat),
 			chance = chance,
-			kind = Note {
+			kind = Source_Note {
 				number = Note_Number {
 					pitch1 = u8(dlo),
 					octave1 = u8(olo),

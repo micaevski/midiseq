@@ -1,49 +1,37 @@
+TRI_CHORD:
+P1 dur=1
+P3 dur=1
+P5 dur=1
 
-FJ chan=2:
-"FJ.mid"
+PROGRESSION:
+TRI_CHORD! 1
+TRI_CHORD! 2 trans=5d
+TRI_CHORD! 3 trans=1d
+TRI_CHORD! 4  trans=4d 
 
-FJ_BASS chan=4:
-FJ! trans=-12
+KICK chan=3:
+C3 1
+C3 2.5
+C3 3.5
+KICK! 5     
 
-BLAST chan=3:
-G2
-G2 0.5 
-G2 1
-BLAST! 2 rate=2 chance=50
-
-DRUMS chan=3:
-C2
-C2 1.5 vel=10 chance=20 
-E2 1
-F2 1.5 vel=4 chance=20
-E2 1.74 vel=20 chance=30
-DRUMS! 2
+SNARE chan=3: 
+F#2 2
+F#2 4
+SNARE! 5
 
 BASS chan=2:
-F2
-F3   1
-Eb2  1.52 chance=50
-Eb3  1.77 chance=20
-Eb1  3 chance=60
-BASS! 4 trans=5d
- 
-PAD chan=1:
-F4 dur=4
-PAD! 4 trans=2d
+P1O2-P1O4 chance=50
+BASS! 2
 
 
-BASS_LOOP:
-BASS
-BASS_LOOP! 16
+SONG chan=1:
+KICK
+SNARE
+BASS scale=CM
+PROGRESSION scale=CM rate=0.5 
+SONG! 9
 
-
-SONG:
-BLAST chance=40
-BASS_LOOP scale=CPm
-DRUMS
-PAD scale=CPm
-SONG! 32
 
 SONG
-
 
