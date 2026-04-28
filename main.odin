@@ -1,7 +1,6 @@
 package main
 
 import "core:fmt"
-import "core:os"
 import "seq"
 import rl "vendor:raylib"
 
@@ -41,14 +40,7 @@ draw_beat_counter :: proc(beat: f32, area: rl.Rectangle) {
 // or everything got retired), spawn a fresh root via `start_sequencer`.
 // Sequencer is left untouched on parse or read failure.
 reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string) -> bool {
-	bytes, err := os.read_entire_file(path, context.allocator)
-	if err != nil {
-		fmt.eprintfln("could not read %s: %v", path, err)
-		return false
-	}
-	defer delete(bytes)
-
-	new_root, ok := seq.parse_source(parser, string(bytes))
+	new_root, ok := seq.parse_file(parser, path)
 	if !ok do return false
 
 	// Rewire runtime cursors before the swap (uses old names + new
@@ -69,6 +61,11 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string
 }
 
 
+try_start_sequencer :: proc(s: ^seq.Sequencer) {
+	if s.source_root != seq.NIL_SOURCE do seq.start_sequencer(s)
+}
+
+
 main :: proc() {
 	midi: Midi_Out
 	if !midi_open(&midi) do return
@@ -82,7 +79,7 @@ main :: proc() {
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
 
-	if !reload_song(&sequencer, &parser, SONG_PATH) do return
+	reload_song(&sequencer, &parser, SONG_PATH)
 
 	watcher := File_Watcher {
 		path = SONG_PATH,
@@ -110,7 +107,7 @@ main :: proc() {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			if shift {
 				if seq.sequencer_finished(&sequencer) {
-					seq.start_sequencer(&sequencer)
+					try_start_sequencer(&sequencer)
 				}
 				playing = true
 			} else if playing {
@@ -118,7 +115,7 @@ main :: proc() {
 				playing = false
 			} else {
 				seq.silence(&sequencer)
-				seq.start_sequencer(&sequencer)
+				try_start_sequencer(&sequencer)
 				playing = true
 			}
 		}
@@ -136,7 +133,7 @@ main :: proc() {
 
 		if rl.GuiButton(rl.Rectangle{20, 20, 100, 40}, "Start") {
 			if seq.sequencer_finished(&sequencer) {
-				seq.start_sequencer(&sequencer)
+				try_start_sequencer(&sequencer)
 			}
 			playing = true
 		}
@@ -148,7 +145,7 @@ main :: proc() {
 		}
 		if rl.GuiButton(rl.Rectangle{260, 20, 100, 40}, "Stop") {
 			seq.silence(&sequencer)
-			seq.start_sequencer(&sequencer)
+			try_start_sequencer(&sequencer)
 			playing = false
 		}
 

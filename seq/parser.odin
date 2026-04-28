@@ -25,14 +25,19 @@ import "core:strings"
 // sequencer (and so `adapt_to_source` doesn't need to know about the
 // parser at all).
 Parser :: struct {
-	source:    [dynamic]Source_Event,
-	names:     Names,
-	rng_state: u32,
-	src:       string,
-	pos:       int,
-	line:      int,
-	col:       int,
+	source:      [dynamic]Source_Event,
+	names:       Names,
+	rng_state:   u32,
+	src:         string,
+	pos:         int,
+	line:        int,
+	col:         int,
+	scratch:     mem.Arena,
+	scratch_buf: []byte,
 }
+
+
+PARSE_SCRATCH_BYTES :: 4 * 1024 * 1024
 
 
 // The implicit global-scope timeline. Reserved as a label name; defining
@@ -47,13 +52,30 @@ make_parser :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Parser {
 	p := Parser{}
 	p.source = make_source_store(capacity)
 	p.names = make_names()
+	p.scratch_buf = make([]byte, PARSE_SCRATCH_BYTES)
+	mem.arena_init(&p.scratch, p.scratch_buf)
 	return p
 }
 
 destroy_parser :: proc(p: ^Parser) {
 	delete(p.source)
 	destroy_names(&p.names)
+	delete(p.scratch_buf)
 	p^ = {}
+}
+
+
+parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bool) {
+	mem.arena_free_all(&parser.scratch)
+	context.allocator = mem.arena_allocator(&parser.scratch)
+
+	bytes, err := os.read_entire_file(path, context.allocator)
+	if err != nil {
+		fmt.eprintfln("could not read %s: %v", path, err)
+		return NIL_SOURCE, false
+	}
+
+	return parse_source(parser, string(bytes))
 }
 
 
@@ -80,6 +102,8 @@ destroy_parser :: proc(p: ^Parser) {
 // global scope. `time` defaults to 0. Note names (C4, F#3, Ab-1, ...)
 // are reserved and cannot be used as label names.
 parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
+	context.allocator = mem.arena_allocator(&parser.scratch)
+
 	// Wipe any leftovers from a previous parse (or from buffers we
 	// just received via swap on a previous successful reparse).
 	source_store_reset(&parser.source)
@@ -363,14 +387,12 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 		parse_error(p, "could not read midi file %q: %v", path, read_err)
 		return false
 	}
-	defer delete(bytes)
 
 	notes, ok := parse_midi_file(bytes)
 	if !ok {
 		parse_error(p, "could not parse midi file %q", path)
 		return false
 	}
-	defer delete(notes)
 
 	for n in notes {
 		add_source_event(
