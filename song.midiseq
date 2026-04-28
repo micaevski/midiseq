@@ -29,13 +29,19 @@ BASS! 4 trans=5d
  
 PAD chan=1:
 F4 dur=4
-PAD! 4 trans=1d
+PAD! 4 trans=2d
+
+
+BASS_LOOP:
+BASS
+BASS_LOOP! 16
+
 
 SONG:
 BLAST chance=40
-BASS scale=Cm
+BASS_LOOP scale=CPm
 DRUMS
-PAD scale=Cm
+PAD scale=CPm
 SONG! 32
 
 SONG

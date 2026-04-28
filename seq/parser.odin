@@ -502,7 +502,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 			tok, ok := parse_scale_token(p)
 			if !ok {parse_error(p, "expected scale name"); return false}
 			s, ok2 := parse_scale_name(tok)
-			if !ok2 {parse_error(p, "invalid scale name: %s", tok); return false}
+			if !ok2 {parse_error(p, "invalid scale name: %s (%s)", tok, SCALE_NAME_HELP); return false}
 			scale = s
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
