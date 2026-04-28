@@ -328,12 +328,12 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 
 		// Event or SEED. Notes start with a note letter, and might
 		// otherwise look like an ident; try the note pattern first.
-		if num, is_note := try_parse_note_name(p); is_note {
-			if !parse_note_event(p, current_parent, num) do return false
+		if lo, hi, is_note := try_parse_note_range(p); is_note {
+			if !parse_note_event(p, current_parent, lo, hi) do return false
 			continue
 		}
-		if deg, oct, is_deg := try_parse_degree_note(p); is_deg {
-			if !parse_degree_note_event(p, current_parent, deg, oct) do return false
+		if dlo, olo, dhi, ohi, is_deg := try_parse_degree_range(p); is_deg {
+			if !parse_degree_note_event(p, current_parent, dlo, olo, dhi, ohi) do return false
 			continue
 		}
 
@@ -409,7 +409,7 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 				beat = quantize(n.start_beat + time),
 				chance = NOTE_DEFAULT_CHANCE,
 				kind = Note {
-					number = Note_Number{pitch = n.number, is_degree = false},
+					number = Note_Number{pitch1 = u8(n.number), pitch2 = u8(n.number), is_degree = false},
 					velocity = n.velocity,
 					duration = max(quantize(n.duration), BEAT_QUANTUM),
 				},
@@ -578,7 +578,7 @@ NOTE_DEFAULT_CHANCE :: 100
 // The note name has already been consumed by try_parse_note_name;
 // `pitch` is the resolved MIDI number.
 @(private)
-parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
+parse_note_event :: proc(p: ^Parser, parent: Source_Index, lo, hi: i32) -> bool {
 	skip_inline_ws(p)
 	beat: f32 = 0
 	if !at_line_end(p) && !is_kwarg_start(p) {
@@ -624,7 +624,7 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
 			beat = quantize(beat),
 			chance = chance,
 			kind = Note {
-				number = Note_Number{pitch = pitch, is_degree = false},
+				number = Note_Number{pitch1 = u8(lo), pitch2 = u8(hi), is_degree = false},
 				velocity = vel,
 				duration = max(quantize(dur), BEAT_QUANTUM),
 			},
@@ -638,7 +638,7 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
 parse_degree_note_event :: proc(
 	p: ^Parser,
 	parent: Source_Index,
-	degree, octave: i32,
+	dlo, olo, dhi, ohi: i32,
 ) -> bool {
 	skip_inline_ws(p)
 	beat: f32 = 0
@@ -685,7 +685,13 @@ parse_degree_note_event :: proc(
 			beat = quantize(beat),
 			chance = chance,
 			kind = Note {
-				number = Note_Number{pitch = degree, octave = octave, is_degree = true},
+				number = Note_Number {
+					pitch1 = u8(dlo),
+					octave1 = u8(olo),
+					pitch2 = u8(dhi),
+					octave2 = u8(ohi),
+					is_degree = true,
+				},
 				velocity = vel,
 				duration = max(quantize(dur), BEAT_QUANTUM),
 			},
@@ -851,6 +857,27 @@ is_degree_note_name_string :: proc(s: string) -> bool {
 
 // Try to consume a note name at the current position. On success
 // advances `p` and returns the MIDI number; on failure restores `p`
+@(private)
+try_parse_degree_range :: proc(p: ^Parser) -> (dlo, olo, dhi, ohi: i32, ok: bool) {
+	d, o, ok1 := try_parse_degree_note(p)
+	if !ok1 do return 0, 0, 0, 0, false
+	if p.pos + 1 < len(p.src) && p.src[p.pos] == '-' {
+		nx := p.src[p.pos + 1]
+		if nx == 'P' || nx == 'p' {
+			p.pos += 1
+			p.col += 1
+			d2, o2, ok2 := try_parse_degree_note(p)
+			if !ok2 {
+				parse_error(p, "expected degree note after '-' in range")
+				return 0, 0, 0, 0, false
+			}
+			return d, o, d2, o2, true
+		}
+	}
+	return d, o, d, o, true
+}
+
+
 // and returns false (no error emitted).
 @(private)
 try_parse_degree_note :: proc(p: ^Parser) -> (degree, octave: i32, ok: bool) {
@@ -904,6 +931,26 @@ try_parse_degree_note :: proc(p: ^Parser) -> (degree, octave: i32, ok: bool) {
 	}
 
 	return deg, oct, true
+}
+
+
+@(private)
+try_parse_note_range :: proc(p: ^Parser) -> (lo, hi: i32, ok: bool) {
+	v, ok1 := try_parse_note_name(p)
+	if !ok1 do return 0, 0, false
+	if p.pos + 1 < len(p.src) && p.src[p.pos] == '-' {
+		if _, is_letter := note_letter_base(p.src[p.pos + 1]); is_letter {
+			p.pos += 1
+			p.col += 1
+			v2, ok2 := try_parse_note_name(p)
+			if !ok2 {
+				parse_error(p, "expected note after '-' in range")
+				return 0, 0, false
+			}
+			return v, v2, true
+		}
+	}
+	return v, v, true
 }
 
 

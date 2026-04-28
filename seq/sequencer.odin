@@ -20,9 +20,11 @@ quantize :: proc(t: f32) -> f32 {
 }
 
 Note_Number :: bit_field u32 {
-	pitch:     i32  | 16,
-	octave:    i32  | 8,
-	is_degree: bool | 8,
+	pitch1:    u8   | 7,
+	octave1:   u8   | 7,
+	pitch2:    u8   | 7,
+	octave2:   u8   | 7,
+	is_degree: bool | 1,
 }
 
 Note :: struct {
@@ -466,9 +468,27 @@ play_timeline :: proc(
 			if chan == -1 do chan = 0
 			raw: i32
 			if k.number.is_degree {
-				raw = degree_to_midi(k.number.pitch, k.number.octave, timeline.scale)
+				size := scale_size(timeline.scale)
+				pos_lo := i32(k.number.octave1) * size + i32(k.number.pitch1) - 1
+				pos_hi := i32(k.number.octave2) * size + i32(k.number.pitch2) - 1
+				if pos_lo == pos_hi {
+					raw = midi_from_pos(pos_lo, timeline.scale)
+				} else {
+					if pos_hi < pos_lo do pos_lo, pos_hi = pos_hi, pos_lo
+					picked :=
+						pos_lo +
+						i32(rand_u32(&sequencer.rng_state) % u32(pos_hi - pos_lo + 1))
+					raw = midi_from_pos(picked, timeline.scale)
+				}
 			} else {
-				raw = k.number.pitch
+				lo := i32(k.number.pitch1)
+				hi := i32(k.number.pitch2)
+				if lo == hi {
+					raw = lo
+				} else {
+					if hi < lo do lo, hi = hi, lo
+					raw = lo + i32(rand_u32(&sequencer.rng_state) % u32(hi - lo + 1))
+				}
 			}
 			num := raw + i32(timeline.transposition.semitones)
 			if timeline.transposition.degrees != 0 {

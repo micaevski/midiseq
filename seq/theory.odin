@@ -73,6 +73,25 @@ degree_to_midi :: proc(degree, octave: i32, scale: Scale) -> i32 {
 	return (final_octave + 1) * 12 + pitch_class
 }
 
+
+scale_size :: proc(scale: Scale) -> i32 {
+	s := i32(len(scale_offsets(scale.kind)))
+	if s == 0 do return 12
+	return s
+}
+
+
+midi_from_pos :: proc(pos: i32, scale: Scale) -> i32 {
+	offsets := scale_offsets(scale.kind)
+	size := i32(len(offsets))
+	if size == 0 {
+		return pos + 12
+	}
+	octave := floor_div(pos, size)
+	degree_idx := mod_pos(pos, size)
+	return degree_to_midi(degree_idx + 1, octave, scale)
+}
+
 // Scale-degree offsets in semitones from the scale's root, in ascending
 // order. The first offset is always 0; the last is < 12.
 @(private)
