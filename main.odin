@@ -180,17 +180,30 @@ main :: proc() {
 		// Dashboard occupies the top DASHBOARD_H px and stays fixed; the
 		// viz area below stretches with the window.
 		DASHBOARD_H :: f32(160)
+		FOOTER_H :: f32(28)
 		BEAT_W :: f32(180)
 		screen_w := f32(rl.GetScreenWidth())
 		screen_h := f32(rl.GetScreenHeight())
 
 		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 20, BEAT_W, 100})
 
-		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - 20}
+		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
 		if show_debug {
 			debug_draw_source(&sequencer, viz_area)
 		} else {
 			draw_active(&vis, &sequencer, viz_area, dt)
+		}
+
+		footer_area := rl.Rectangle{0, screen_h - FOOTER_H, screen_w, FOOTER_H}
+		rl.DrawRectangleRec(footer_area, rl.Color{15, 15, 22, 255})
+		if len(parser.last_error) > 0 {
+			ui_draw_text(
+				fmt.ctprintf("%s", parser.last_error),
+				12,
+				i32(footer_area.y) + 7,
+				14,
+				rl.Color{255, 110, 110, 255},
+			)
 		}
 		ui_draw_text(
 			"[TAB] toggle debug",

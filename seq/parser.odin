@@ -34,6 +34,7 @@ Parser :: struct {
 	col:         int,
 	scratch:     mem.Arena,
 	scratch_buf: []byte,
+	last_error:  string,
 }
 
 
@@ -66,12 +67,14 @@ destroy_parser :: proc(p: ^Parser) {
 
 
 parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bool) {
+	parser.last_error = ""
 	mem.arena_free_all(&parser.scratch)
 	context.allocator = mem.arena_allocator(&parser.scratch)
 
 	bytes, err := os.read_entire_file(path, context.allocator)
 	if err != nil {
-		fmt.eprintfln("could not read %s: %v", path, err)
+		parser.last_error = fmt.aprintf("could not read %s: %v", path, err)
+		fmt.eprintln(parser.last_error)
 		return NIL_SOURCE, false
 	}
 
@@ -288,7 +291,7 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 			if !at_line_end(p) {
 				v, ok := parse_number(p)
 				if !ok {parse_error(p, "expected time after path"); return false}
-				time = v
+				time = v - 1
 			}
 			if !expect_line_end(p) do return false
 			if !load_midi_into(p, path, current_parent, time) do return false
@@ -478,7 +481,7 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 	if !at_line_end(p) && !is_kwarg_start(p) {
 		v, ok := parse_number(p)
 		if !ok {parse_error(p, "expected time or kwarg"); return false}
-		beat = v
+		beat = v - 1
 	}
 
 	trans: Transposition
@@ -581,7 +584,7 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, pitch: i32) -> bool {
 	if !at_line_end(p) && !is_kwarg_start(p) {
 		v, ok := parse_number(p)
 		if !ok {parse_error(p, "expected time or kwarg"); return false}
-		beat = v
+		beat = v - 1
 	}
 
 	vel: i32 = NOTE_DEFAULT_VELOCITY
@@ -642,7 +645,7 @@ parse_degree_note_event :: proc(
 	if !at_line_end(p) && !is_kwarg_start(p) {
 		v, ok := parse_number(p)
 		if !ok {parse_error(p, "expected time or kwarg"); return false}
-		beat = v
+		beat = v - 1
 	}
 
 	vel: i32 = NOTE_DEFAULT_VELOCITY
@@ -1087,6 +1090,7 @@ is_digit :: proc(c: u8) -> bool {
 
 @(private)
 parse_error :: proc(p: ^Parser, format: string, args: ..any) {
-	fmt.eprintf("parse error at %d:%d: ", p.line, p.col)
-	fmt.eprintfln(format, ..args)
+	body := fmt.aprintf(format, ..args)
+	p.last_error = fmt.aprintf("parse error at %d:%d: %s", p.line, p.col, body)
+	fmt.eprintln(p.last_error)
 }
