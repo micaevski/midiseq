@@ -496,7 +496,7 @@ play_timeline :: proc(
 		case Source_Timeline:
 			if k.free do runtime_event.parent = timeline_event.parent
 			child_channel := k.channel
-			if timeline.channel != -1 do child_channel = timeline.channel
+			if child_channel == -1 do child_channel = timeline.channel
 			child_scale := k.scale
 			if child_scale.kind == .None do child_scale = timeline.scale
 			runtime_event.kind = Runtime_Timeline {
