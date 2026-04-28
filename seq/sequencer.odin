@@ -215,19 +215,14 @@ add_source_event :: proc(
 Adapt the running sequencer to a new source, point runtime events to the new sources if they still exists. 
 Retire events that belong to timeline that were removed by marking them to as finished.
 */
-adapt_to_source :: proc(
-	sequencer: ^Sequencer,
-	new_source: ^[dynamic]Source_Event,
-	new_names: ^Names,
-	new_root: Source_Index,
-) {
+adapt_to_source :: proc(sequencer: ^Sequencer, parser: ^Parser, new_root: Source_Index) {
 	current_index := sequencer.active_head
 	for current_index != NIL_RUNTIME {
 		event := runtime_get(&sequencer.runtime_pool, current_index)
 		switch _ in event.kind {
 		case Runtime_Note:
 			n := &event.kind.(Runtime_Note)
-			if new_idx, ok := remap_idx(n.parent_source_idx, &sequencer.names, new_names); ok {
+			if new_idx, ok := remap_idx(n.parent_source_idx, &sequencer.names, &parser.names); ok {
 				n.parent_source_idx = new_idx
 			} else {
 				// Mark note for retirement by setting time in the past.
@@ -235,11 +230,11 @@ adapt_to_source :: proc(
 			}
 		case Runtime_Timeline:
 			t := &event.kind.(Runtime_Timeline)
-			if new_idx, ok := remap_idx(t.source_idx, &sequencer.names, new_names); ok {
+			if new_idx, ok := remap_idx(t.source_idx, &sequencer.names, &parser.names); ok {
 				// If the source timeline exists, set the cursor to point the same time.
 				t.source_idx = new_idx
 				t.cursor = first_cursor_after(
-					new_source,
+					&parser.source,
 					new_idx,
 					(sequencer.beat - event.beat) * t.rate,
 				)
@@ -250,6 +245,11 @@ adapt_to_source :: proc(
 		}
 		current_index = event.active_next
 	}
+
+	parser.source, sequencer.source = sequencer.source, parser.source
+	parser.names, sequencer.names = sequencer.names, parser.names
+	sequencer.source_root = new_root
+	sequencer.rng_state = parser.rng_state
 }
 
 @(private)
@@ -283,7 +283,7 @@ first_cursor_after :: proc(
 	return NIL_SOURCE
 }
 
-start_sequencer :: proc(sequencer: ^Sequencer) {
+start :: proc(sequencer: ^Sequencer) {
 	sequencer.beat = 0
 
 	// Wipe the runtime pool — no need to walk-and-free individual events.
@@ -313,7 +313,7 @@ start_sequencer :: proc(sequencer: ^Sequencer) {
 }
 
 
-sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
+tick :: proc(sequencer: ^Sequencer, dt: f32) {
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
 	previous_index := NIL_RUNTIME
@@ -392,7 +392,7 @@ sequencer_tick :: proc(sequencer: ^Sequencer, dt: f32) {
 }
 
 
-sequencer_finished :: proc(sequencer: ^Sequencer) -> bool {
+finished :: proc(sequencer: ^Sequencer) -> bool {
 	return sequencer.active_head == NIL_RUNTIME
 }
 
@@ -418,6 +418,26 @@ rand_u32 :: proc(state: ^u32) -> u32 {
 	x ~= x << 5
 	state^ = x
 	return x
+}
+
+
+@(private)
+resolve_note_pitch :: proc(n: Note_Number, scale: Scale, rng: ^u32) -> i32 {
+	pos_lo, pos_hi: i32
+	if n.is_degree {
+		size := scale_size(scale)
+		pos_lo = i32(n.octave1) * size + i32(n.pitch1) - 1
+		pos_hi = i32(n.octave2) * size + i32(n.pitch2) - 1
+	} else {
+		pos_lo = i32(n.pitch1)
+		pos_hi = i32(n.pitch2)
+	}
+	if pos_hi < pos_lo do pos_lo, pos_hi = pos_hi, pos_lo
+
+	pos := pos_lo
+	if pos_hi != pos_lo do pos += i32(rand_u32(rng) % u32(pos_hi - pos_lo + 1))
+
+	return n.is_degree ? midi_from_pos(pos, scale) : pos
 }
 
 
@@ -466,39 +486,14 @@ play_timeline :: proc(
 		case Note:
 			chan := timeline.channel
 			if chan == -1 do chan = 0
-			raw: i32
-			if k.number.is_degree {
-				size := scale_size(timeline.scale)
-				pos_lo := i32(k.number.octave1) * size + i32(k.number.pitch1) - 1
-				pos_hi := i32(k.number.octave2) * size + i32(k.number.pitch2) - 1
-				if pos_lo == pos_hi {
-					raw = midi_from_pos(pos_lo, timeline.scale)
-				} else {
-					if pos_hi < pos_lo do pos_lo, pos_hi = pos_hi, pos_lo
-					picked :=
-						pos_lo +
-						i32(rand_u32(&sequencer.rng_state) % u32(pos_hi - pos_lo + 1))
-					raw = midi_from_pos(picked, timeline.scale)
-				}
-			} else {
-				lo := i32(k.number.pitch1)
-				hi := i32(k.number.pitch2)
-				if lo == hi {
-					raw = lo
-				} else {
-					if hi < lo do lo, hi = hi, lo
-					raw = lo + i32(rand_u32(&sequencer.rng_state) % u32(hi - lo + 1))
-				}
-			}
+			raw := resolve_note_pitch(k.number, timeline.scale, &sequencer.rng_state)
 			num := raw + i32(timeline.transposition.semitones)
-			if timeline.transposition.degrees != 0 {
-				num = shift_in_scale(
-					num,
-					i32(timeline.transposition.degrees),
-					timeline.scale.root,
-					scale_offsets(timeline.scale.kind),
-				)
-			}
+			num = shift_in_scale(
+				num,
+				i32(timeline.transposition.degrees),
+				timeline.scale.root,
+				scale_offsets(timeline.scale.kind),
+			)
 			duration := max(quantize(k.duration / timeline.rate), BEAT_QUANTUM)
 			runtime_event.kind = Runtime_Note {
 				number            = num,

@@ -47,24 +47,17 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string
 
 	// Rewire runtime cursors before the swap (uses old names + new
 	// names.by_name, both alive at this point).
-	seq.adapt_to_source(sequencer, &parser.source, &parser.names, new_root)
-
-	// Ping-pong: parser ↔ sequencer.
-	parser.source, sequencer.source = sequencer.source, parser.source
-	parser.names, sequencer.names = sequencer.names, parser.names
-
-	sequencer.source_root = new_root
-	sequencer.rng_state = parser.rng_state
+	seq.adapt_to_source(sequencer, parser, new_root)
 
 	if sequencer.active_head == seq.NIL_RUNTIME {
-		seq.start_sequencer(sequencer)
+		seq.start(sequencer)
 	}
 	return true
 }
 
 
-try_start_sequencer :: proc(s: ^seq.Sequencer) {
-	if s.source_root != seq.NIL_SOURCE do seq.start_sequencer(s)
+try_start :: proc(s: ^seq.Sequencer) {
+	if s.source_root != seq.NIL_SOURCE do seq.start(s)
 }
 
 
@@ -124,8 +117,8 @@ main :: proc() {
 		if rl.IsKeyPressed(.SPACE) {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			if shift {
-				if seq.sequencer_finished(&sequencer) {
-					try_start_sequencer(&sequencer)
+				if seq.finished(&sequencer) {
+					try_start(&sequencer)
 				}
 				playing = true
 			} else if playing {
@@ -133,7 +126,7 @@ main :: proc() {
 				playing = false
 			} else {
 				seq.silence(&sequencer)
-				try_start_sequencer(&sequencer)
+				try_start(&sequencer)
 				playing = true
 			}
 		}
@@ -142,16 +135,16 @@ main :: proc() {
 			reload_song(&sequencer, &parser, SONG_PATH)
 		}
 
-		if playing && !seq.sequencer_finished(&sequencer) {
-			seq.sequencer_tick(&sequencer, dt)
+		if playing && !seq.finished(&sequencer) {
+			seq.tick(&sequencer, dt)
 		}
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 
 		if rl.GuiButton(rl.Rectangle{20, 20, 100, 40}, "Start") {
-			if seq.sequencer_finished(&sequencer) {
-				try_start_sequencer(&sequencer)
+			if seq.finished(&sequencer) {
+				try_start(&sequencer)
 			}
 			playing = true
 		}
@@ -163,7 +156,7 @@ main :: proc() {
 		}
 		if rl.GuiButton(rl.Rectangle{260, 20, 100, 40}, "Stop") {
 			seq.silence(&sequencer)
-			try_start_sequencer(&sequencer)
+			try_start(&sequencer)
 			playing = false
 		}
 
