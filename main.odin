@@ -94,7 +94,7 @@ main :: proc() {
 	load_ui_font()
 	defer unload_ui_font()
 
-	vis: Visualizer
+	vis := make_visualizer()
 	defer destroy_visualizer(&vis)
 
 	playing := true

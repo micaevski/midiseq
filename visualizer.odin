@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:mem"
 import "seq"
 import rl "vendor:raylib"
 
@@ -11,11 +12,27 @@ import rl "vendor:raylib"
 // State across frames is just scroll offsets — the node list is rebuilt
 // each frame from the live active chain.
 Visualizer :: struct {
-	scroll_x: f32,
-	scroll_y: f32,
+	scroll_x:  f32,
+	scroll_y:  f32,
+	frame:     mem.Arena,
+	frame_buf: []byte,
 }
 
-destroy_visualizer :: proc(vis: ^Visualizer) {}
+
+VIS_FRAME_BYTES :: 1 * 1024 * 1024
+
+
+make_visualizer :: proc() -> Visualizer {
+	v := Visualizer{}
+	v.frame_buf = make([]byte, VIS_FRAME_BYTES)
+	mem.arena_init(&v.frame, v.frame_buf)
+	return v
+}
+
+destroy_visualizer :: proc(vis: ^Visualizer) {
+	delete(vis.frame_buf)
+	vis^ = {}
+}
 
 @(private = "file")
 CELL_W :: f32(140)
@@ -111,9 +128,8 @@ node_color :: proc(e: ^seq.Runtime_Event) -> rl.Color {
 draw_active :: proc(vis: ^Visualizer, sequencer: ^seq.Sequencer, area: rl.Rectangle, dt: f32) {
 	rl.DrawRectangleRec(area, rl.Color{18, 18, 24, 255})
 
-	// All scratch allocations in this frame go through the temp arena,
-	// which main wipes once per loop iteration.
-	context.allocator = context.temp_allocator
+	mem.arena_free_all(&vis.frame)
+	context.allocator = mem.arena_allocator(&vis.frame)
 
 	nodes := make([dynamic]Flame_Node, 0, 64)
 	rt_to_node := make(map[seq.Runtime_Index]int, 64)
