@@ -1,6 +1,7 @@
 package seq
 
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 
 
@@ -151,7 +152,6 @@ Sequencer :: struct {
 	source:        [dynamic]Source_Event,
 	runtime_pool:  Runtime_Pool,
 	sink:          Sink,
-	rng_state:     u32, // xorshift32; set via `SEED = N` in source
 	names:         Names,
 	playing_notes: [16][128]Runtime_Index,
 }
@@ -249,7 +249,7 @@ adapt_to_source :: proc(sequencer: ^Sequencer, parser: ^Parser, new_root: Source
 	parser.source, sequencer.source = sequencer.source, parser.source
 	parser.names, sequencer.names = sequencer.names, parser.names
 	sequencer.source_root = new_root
-	sequencer.rng_state = parser.rng_state
+	rand.reset_u64(parser.seed)
 }
 
 @(private)
@@ -409,22 +409,8 @@ silence :: proc(sequencer: ^Sequencer) {
 	}
 }
 
-// xorshift32. Remaps 0 to a fixed non-zero so an un-seeded sequencer
-// still produces a deterministic stream.
 @(private)
-rand_u32 :: proc(state: ^u32) -> u32 {
-	if state^ == 0 do state^ = 0xdeadbeef
-	x := state^
-	x ~= x << 13
-	x ~= x >> 17
-	x ~= x << 5
-	state^ = x
-	return x
-}
-
-
-@(private)
-resolve_note_pitch :: proc(n: Note_Number, scale: Scale, rng: ^u32) -> i32 {
+resolve_note_pitch :: proc(n: Note_Number, scale: Scale) -> i32 {
 	pos_lo, pos_hi: i32
 	if n.is_degree {
 		size := scale_size(scale)
@@ -437,7 +423,7 @@ resolve_note_pitch :: proc(n: Note_Number, scale: Scale, rng: ^u32) -> i32 {
 	if pos_hi < pos_lo do pos_lo, pos_hi = pos_hi, pos_lo
 
 	pos := pos_lo
-	if pos_hi != pos_lo do pos += i32(rand_u32(rng) % u32(pos_hi - pos_lo + 1))
+	if pos_hi != pos_lo do pos += i32(rand.int_max(int(pos_hi - pos_lo + 1)))
 
 	return n.is_degree ? midi_from_pos(pos, scale) : pos
 }
@@ -467,7 +453,7 @@ play_timeline :: proc(
 
 		// Evaluate chance.
 		if cursor_event.chance < 100 {
-			roll := i32(rand_u32(&sequencer.rng_state) % 100)
+			roll := i32(rand.int_max(100))
 			if roll >= cursor_event.chance {
 				timeline.cursor = cursor_event.next
 				continue
@@ -487,7 +473,7 @@ play_timeline :: proc(
 		switch k in cursor_event.kind {
 		case Source_Note:
 			chan := i32(timeline.channel)
-			raw := resolve_note_pitch(k.number, timeline.scale, &sequencer.rng_state)
+			raw := resolve_note_pitch(k.number, timeline.scale)
 			num := raw + i32(timeline.transposition.semitones)
 			num = shift_in_scale(
 				num,

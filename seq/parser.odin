@@ -27,7 +27,7 @@ import "core:strings"
 Parser :: struct {
 	source:      [dynamic]Source_Event,
 	names:       Names,
-	rng_state:   u32,
+	seed:        u64,
 	src:         string,
 	pos:         int,
 	line:        int,
@@ -111,7 +111,7 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	// just received via swap on a previous successful reparse).
 	source_store_reset(&parser.source)
 	names_reset(&parser.names)
-	parser.rng_state = 0
+	parser.seed = 0
 
 	parser.src = src
 	parser.pos = 0
@@ -242,7 +242,7 @@ pass_1 :: proc(p: ^Parser) -> bool {
 					p.col += 1
 					n, n_ok := parse_number(p)
 					if !n_ok {parse_error(p, "expected SEED value"); return false}
-					p.rng_state = u32(n)
+					p.seed = u64(n)
 					skip_to_line_end(p)
 					continue
 				}
