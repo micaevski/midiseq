@@ -68,6 +68,14 @@ try_start_sequencer :: proc(s: ^seq.Sequencer) {
 }
 
 
+ensure_no_more_allocations :: proc() -> mem.Allocator {
+	when ODIN_DEBUG {
+		return mem.panic_allocator()
+	}
+	return context.allocator
+}
+
+
 main :: proc() {
 	temp_buf := make([]byte, TEMP_ARENA_BYTES)
 	defer delete(temp_buf)
@@ -107,6 +115,8 @@ main :: proc() {
 
 	playing := true
 	show_debug := false
+
+	context.allocator = ensure_no_more_allocations()
 
 	for !rl.WindowShouldClose() {
 		dt := rl.GetFrameTime()
