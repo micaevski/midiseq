@@ -201,6 +201,10 @@ main :: proc() {
 	in_dropdown_open := false
 	out_dropdown_open := false
 
+	// Save the heap allocator so we can restore it after the main loop;
+	// otherwise the defers above run with panic_allocator and trip on
+	// their `delete` calls.
+	heap_allocator := context.allocator
 	context.allocator = ensure_no_more_allocations()
 
 	for !rl.WindowShouldClose() {
@@ -392,4 +396,8 @@ main :: proc() {
 
 	seq.silence(&sequencer)
 	rl.WaitTime(0.05)
+
+	// Restore so the deferred destroy_* calls can free with the same
+	// allocator that allocated.
+	context.allocator = heap_allocator
 }
