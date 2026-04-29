@@ -1,6 +1,6 @@
 package tests
 
-import "../seq"
+import "../source/seq"
 import "core:testing"
 
 

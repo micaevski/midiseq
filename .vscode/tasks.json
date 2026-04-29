@@ -5,7 +5,7 @@
 			"label": "MidiSeq Debug",
 			"type": "shell",
 			"command": "odin",
-			"args": ["build", ".", "-debug", "-out:midiseq"],
+			"args": ["build", "source", "-debug", "-out:build/midiseq"],
 			"group": {
 				"kind": "build",
 				"isDefault": true
@@ -16,7 +16,7 @@
 			"label": "MidiSeq Release",
 			"type": "shell",
 			"command": "odin",
-			"args": ["build", ".", "-o:speed", "-out:midiseq-release"],
+			"args": ["build", "source", "-o:speed", "-out:build/midiseq-release"],
 			"group": "build",
 			"problemMatcher": []
 		},
@@ -24,7 +24,7 @@
 			"label": "MidiSeq Debug Optimized",
 			"type": "shell",
 			"command": "odin",
-			"args": ["build", ".", "-o:speed", "-debug", "-out:midiseq-relwithdebinfo"],
+			"args": ["build", "source", "-o:speed", "-debug", "-out:build/midiseq-relwithdebinfo"],
 			"group": "build",
 			"problemMatcher": []
 		}

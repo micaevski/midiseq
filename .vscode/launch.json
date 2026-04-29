@@ -5,7 +5,7 @@
 			"name": "MidiSeq Debug",
 			"type": "lldb",
 			"request": "launch",
-			"program": "${workspaceFolder}/midiseq",
+			"program": "${workspaceFolder}/build/midiseq",
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"preLaunchTask": "MidiSeq Debug"
@@ -14,7 +14,7 @@
 			"name": "MidiSeq Release",
 			"type": "lldb",
 			"request": "launch",
-			"program": "${workspaceFolder}/midiseq-release",
+			"program": "${workspaceFolder}/build/midiseq-release",
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"preLaunchTask": "MidiSeq Release"
@@ -23,7 +23,7 @@
 			"name": "MidiSeq Debug Optimized",
 			"type": "lldb",
 			"request": "launch",
-			"program": "${workspaceFolder}/midiseq-relwithdebinfo",
+			"program": "${workspaceFolder}/build/midiseq-relwithdebinfo",
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"preLaunchTask": "MidiSeq Debug Optimized"

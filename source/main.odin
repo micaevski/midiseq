@@ -6,7 +6,7 @@ import "seq"
 import rl "vendor:raylib"
 
 
-SONG_PATH :: "song.midiseq"
+SONG_PATH :: "resources/song.midiseq"
 TEMP_ARENA_BYTES :: 1 * 1024 * 1024
 
 
