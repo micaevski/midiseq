@@ -292,8 +292,7 @@ start :: proc(sequencer: ^Sequencer) {
 	sequencer.beat = 0
 
 	// Wipe the runtime pool — no need to walk-and-free individual events.
-	sequencer.runtime_pool.count = 1
-	sequencer.runtime_pool.free_head = 0
+	runtime_pool_reset(&sequencer.runtime_pool)
 
 	source := source_get(&sequencer.source, sequencer.source_root)
 	source_timeline := source.kind.(Source_Timeline)

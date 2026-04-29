@@ -10,6 +10,60 @@ SONG_PATH :: "song.midiseq"
 TEMP_ARENA_BYTES :: 1 * 1024 * 1024
 
 
+draw_pool_counter :: proc(label: cstring, used, total: i64, color: rl.Color, area: rl.Rectangle) {
+	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
+	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
+
+	ui_draw_text(label, i32(area.x) + 14, i32(area.y) + 10, 14, rl.Color{140, 140, 160, 255})
+
+	text := fmt.ctprintf("%d", used)
+	size: i32 = 32
+	width := ui_measure_text(text, size)
+	ui_draw_text(text, i32(area.x + area.width / 2) - width / 2, i32(area.y) + 30, size, color)
+
+	sub := fmt.ctprintf("of %d", total)
+	sub_size: i32 = 14
+	sub_w := ui_measure_text(sub, sub_size)
+	ui_draw_text(
+		sub,
+		i32(area.x + area.width / 2) - sub_w / 2,
+		i32(area.y) + 72,
+		sub_size,
+		rl.Color{160, 160, 180, 255},
+	)
+}
+
+
+draw_midi_counter :: proc(events_per_sec: f32, area: rl.Rectangle) {
+	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
+	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
+
+	ui_draw_text("MIDI", i32(area.x) + 14, i32(area.y) + 10, 14, rl.Color{140, 140, 160, 255})
+
+	text := fmt.ctprintf("%.0f", events_per_sec)
+	size: i32 = 32
+	width := ui_measure_text(text, size)
+	ui_draw_text(
+		text,
+		i32(area.x + area.width / 2) - width / 2,
+		i32(area.y) + 30,
+		size,
+		rl.Color{220, 200, 130, 255},
+	)
+
+	sub: cstring = "events/sec"
+	sub_size: i32 = 14
+	sub_w := ui_measure_text(sub, sub_size)
+	ui_draw_text(
+		sub,
+		i32(area.x + area.width / 2) - sub_w / 2,
+		i32(area.y) + 72,
+		sub_size,
+		rl.Color{180, 160, 100, 255},
+	)
+}
+
+
 draw_perf_counter :: proc(frame_ms: f32, fps: i32, area: rl.Rectangle) {
 	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
 	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
@@ -44,13 +98,7 @@ draw_beat_counter :: proc(beat: f32, area: rl.Rectangle) {
 	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
 	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
 
-	ui_draw_text(
-		"BEAT",
-		i32(area.x) + 14,
-		i32(area.y) + 10,
-		14,
-		rl.Color{140, 140, 160, 255},
-	)
+	ui_draw_text("BEAT", i32(area.x) + 14, i32(area.y) + 10, 14, rl.Color{140, 140, 160, 255})
 
 	text := fmt.ctprintf("%.2f", beat)
 	size: i32 = 44
@@ -173,6 +221,7 @@ main :: proc() {
 		if playing && !seq.finished(&sequencer) {
 			seq.tick(&sequencer, dt)
 		}
+		midi_end_frame(&midi, dt)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
@@ -214,18 +263,41 @@ main :: proc() {
 		screen_h := f32(rl.GetScreenHeight())
 
 		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 20, BEAT_W, 100})
-		if show_debug {
-			PERF_W :: f32(200)
-			draw_perf_counter(
-				frame_ms_ema,
-				rl.GetFPS(),
-				rl.Rectangle{screen_w - BEAT_W - 20 - PERF_W - 12, 20, PERF_W, 100},
-			)
-		}
 
 		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
 		if show_debug {
-			debug_draw_source(&sequencer, viz_area)
+			CARD_W :: f32(200)
+			CARD_H :: f32(100)
+			GAP :: f32(12)
+			N :: 4
+			row_w := f32(N) * CARD_W + f32(N - 1) * GAP
+			row_x := viz_area.x + (viz_area.width - row_w) * 0.5
+			row_y := viz_area.y + (viz_area.height - CARD_H) * 0.5
+			card :: proc(x_base, y, w, h, gap: f32, i: int) -> rl.Rectangle {
+				return rl.Rectangle{x_base + f32(i) * (w + gap), y, w, h}
+			}
+			draw_perf_counter(
+				frame_ms_ema,
+				rl.GetFPS(),
+				card(row_x, row_y, CARD_W, CARD_H, GAP, 0),
+			)
+			when ODIN_DEBUG {
+				draw_midi_counter(midi.events_per_sec, card(row_x, row_y, CARD_W, CARD_H, GAP, 1))
+			}
+			draw_pool_counter(
+				"RUNTIME",
+				i64(sequencer.runtime_pool.in_use),
+				i64(seq.runtime_pool_capacity(&sequencer.runtime_pool)),
+				rl.Color{180, 220, 255, 255},
+				card(row_x, row_y, CARD_W, CARD_H, GAP, 2),
+			)
+			draw_pool_counter(
+				"SOURCE",
+				i64(len(sequencer.source) - 1),
+				i64(cap(sequencer.source) - 1),
+				rl.Color{200, 180, 255, 255},
+				card(row_x, row_y, CARD_W, CARD_H, GAP, 3),
+			)
 		} else {
 			draw_active(&vis, &sequencer, viz_area, dt)
 		}
