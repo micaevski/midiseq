@@ -86,8 +86,8 @@ Runtime_Event :: struct {
 
 Sink :: struct {
 	user:     rawptr,
-	note_on:  proc(user: rawptr, channel, number, velocity: i32),
-	note_off: proc(user: rawptr, channel, number: i32),
+	note_on:  proc(user: rawptr, channel, number, velocity: i32, beat: f32),
+	note_off: proc(user: rawptr, channel, number: i32, beat: f32),
 }
 
 
@@ -343,7 +343,12 @@ tick :: proc(sequencer: ^Sequencer, dt: f32) {
 			if event.beat + k.duration <= sequencer.beat {
 				if k.channel >= 0 && k.channel < 16 && k.number >= 0 && k.number < 128 {
 					if sequencer.playing_notes[k.channel][k.number] == current_index {
-						sequencer.sink.note_off(&sequencer.sink, k.channel, k.number)
+						sequencer.sink.note_off(
+							&sequencer.sink,
+							k.channel,
+							k.number,
+							event.beat + k.duration,
+						)
 						sequencer.playing_notes[k.channel][k.number] = NIL_RUNTIME
 					}
 				}
@@ -408,7 +413,7 @@ silence :: proc(sequencer: ^Sequencer) {
 	for ch in 0 ..< 16 {
 		for num in 0 ..< 128 {
 			if sequencer.playing_notes[ch][num] != NIL_RUNTIME {
-				sequencer.sink.note_off(&sequencer.sink, i32(ch), i32(num))
+				sequencer.sink.note_off(&sequencer.sink, i32(ch), i32(num), sequencer.beat)
 				sequencer.playing_notes[ch][num] = NIL_RUNTIME
 			}
 		}
@@ -503,11 +508,11 @@ play_timeline :: proc(
 			}
 			if chan >= 0 && chan < 16 && num >= 0 && num < 128 {
 				if sequencer.playing_notes[chan][num] != NIL_RUNTIME {
-					sequencer.sink.note_off(&sequencer.sink, chan, num)
+					sequencer.sink.note_off(&sequencer.sink, chan, num, runtime_event.beat)
 				}
 				sequencer.playing_notes[chan][num] = new_idx
 			}
-			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity)
+			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity, runtime_event.beat)
 		case Source_Timeline:
 			if k.free do runtime_event.parent = timeline_event.parent
 			child_channel: u8 = timeline.channel

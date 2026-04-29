@@ -56,8 +56,11 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string
 }
 
 
-try_start :: proc(s: ^seq.Sequencer) {
-	if s.source_root != seq.NIL_SOURCE do seq.start(s)
+try_start :: proc(s: ^seq.Sequencer, midi: ^Midi_Out) {
+	if s.source_root != seq.NIL_SOURCE {
+		seq.start(s)
+		midi_reset(midi)
+	}
 }
 
 
@@ -118,7 +121,7 @@ main :: proc() {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			if shift {
 				if seq.finished(&sequencer) {
-					try_start(&sequencer)
+					try_start(&sequencer, &midi)
 				}
 				playing = true
 			} else if playing {
@@ -126,7 +129,7 @@ main :: proc() {
 				playing = false
 			} else {
 				seq.silence(&sequencer)
-				try_start(&sequencer)
+				try_start(&sequencer, &midi)
 				playing = true
 			}
 		}
@@ -144,7 +147,7 @@ main :: proc() {
 
 		if rl.GuiButton(rl.Rectangle{20, 20, 100, 40}, "Start") {
 			if seq.finished(&sequencer) {
-				try_start(&sequencer)
+				try_start(&sequencer, &midi)
 			}
 			playing = true
 		}
@@ -156,7 +159,7 @@ main :: proc() {
 		}
 		if rl.GuiButton(rl.Rectangle{260, 20, 100, 40}, "Stop") {
 			seq.silence(&sequencer)
-			try_start(&sequencer)
+			try_start(&sequencer, &midi)
 			playing = false
 		}
 

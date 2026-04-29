@@ -9,10 +9,17 @@ import "seq"
 
 // Thin wrapper around the PortMIDI output stream. The sequencer owns
 // per-(channel, pitch) ownership and decides when a physical note-off
-// is needed; this layer just emits messages.
+// is needed; this layer just emits messages, gated by a per-key
+// musical-time throttle to keep MIDI volume under what the synth can
+// drain.
 Midi_Out :: struct {
-	stream: pm.Stream,
+	stream:         pm.Stream,
+	last_emit_beat: [16][128]f32,
+	playing:        [16][128]bool,
 }
+
+
+THROTTLE_THRESHOLD :: 4 * seq.BEAT_QUANTUM
 
 
 midi_open :: proc(midi: ^Midi_Out) -> bool {
@@ -37,6 +44,11 @@ midi_open :: proc(midi: ^Midi_Out) -> bool {
 	return true
 }
 
+midi_reset :: proc(midi: ^Midi_Out) {
+	midi.last_emit_beat = {}
+	midi.playing = {}
+}
+
 midi_close :: proc(midi: ^Midi_Out) {
 	if midi.stream != nil {
 		pm.Close(midi.stream)
@@ -49,35 +61,41 @@ midi_close :: proc(midi: ^Midi_Out) {
 // The sequencer passes the sink itself as the user pointer; we pull the
 // owning Midi_Out back out of `sink.user`.
 midi_sink :: proc(midi: ^Midi_Out) -> seq.Sink {
-	on :: proc(user: rawptr, channel, number, velocity: i32) {
+	on :: proc(user: rawptr, channel, number, velocity: i32, beat: f32) {
 		sink := cast(^seq.Sink)user
 		if sink == nil || sink.user == nil do return
-		midi_note_on(cast(^Midi_Out)sink.user, channel, number, velocity)
+		midi_note_on(cast(^Midi_Out)sink.user, channel, number, velocity, beat)
 	}
-	off :: proc(user: rawptr, channel, number: i32) {
+	off :: proc(user: rawptr, channel, number: i32, beat: f32) {
 		sink := cast(^seq.Sink)user
 		if sink == nil || sink.user == nil do return
-		midi_note_off(cast(^Midi_Out)sink.user, channel, number)
+		midi_note_off(cast(^Midi_Out)sink.user, channel, number, beat)
 	}
 	return seq.Sink{user = midi, note_on = on, note_off = off}
 }
 
-midi_note_on :: proc(midi: ^Midi_Out, channel, number, velocity: i32) {
+midi_note_on :: proc(midi: ^Midi_Out, channel, number, velocity: i32, beat: f32) {
 	if midi.stream == nil do return
 	if channel < 0 || channel >= 16 do return
 	if number < 0 || number >= 128 do return
+	last := midi.last_emit_beat[channel][number]
+	if beat <= last + THROTTLE_THRESHOLD do return
 	pm.WriteShort(
 		midi.stream,
 		0,
 		pm.MessageMake(0x90 | c.int(channel), c.int(number), c.int(velocity)),
 	)
+	midi.last_emit_beat[channel][number] = beat
+	midi.playing[channel][number] = true
 }
 
-midi_note_off :: proc(midi: ^Midi_Out, channel, number: i32) {
+midi_note_off :: proc(midi: ^Midi_Out, channel, number: i32, beat: f32) {
 	if midi.stream == nil do return
 	if channel < 0 || channel >= 16 do return
 	if number < 0 || number >= 128 do return
+	if !midi.playing[channel][number] do return
 	pm.WriteShort(midi.stream, 0, pm.MessageMake(0x80 | c.int(channel), c.int(number), 0))
+	midi.playing[channel][number] = false
 }
 
 
