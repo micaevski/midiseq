@@ -142,6 +142,10 @@ names_reset :: proc(n: ^Names) {
 }
 
 
+Tick_Errors :: struct {
+	pool_exhausted: bool,
+}
+
 Sequencer :: struct {
 	tempo:         f32,
 	beat:          f32,
@@ -154,6 +158,7 @@ Sequencer :: struct {
 	sink:          Sink,
 	names:         Names,
 	playing_notes: [16][128]Runtime_Index,
+	tick_errors:   Tick_Errors,
 }
 
 
@@ -316,6 +321,7 @@ start :: proc(sequencer: ^Sequencer) {
 
 
 tick :: proc(sequencer: ^Sequencer, dt: f32) {
+	sequencer.tick_errors = {}
 	sequencer.beat += dt * sequencer.tempo / 60.0
 
 	previous_index := NIL_RUNTIME
@@ -461,7 +467,14 @@ play_timeline :: proc(
 		}
 
 		new_idx := runtime_alloc(&sequencer.runtime_pool)
-		if new_idx == NIL_RUNTIME do break // pool exhausted; try again next tick
+		if new_idx == NIL_RUNTIME {
+			// Pool exhausted: drop the event and advance the cursor so
+			// the timeline can still retire. Otherwise stuck cursors hold
+			// the pool full forever.
+			sequencer.tick_errors.pool_exhausted = true
+			timeline.cursor = cursor_event.next
+			continue
+		}
 
 		runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 		// Translate the source-domain beat into root-time. For the root

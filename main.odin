@@ -189,14 +189,14 @@ main :: proc() {
 
 		footer_area := rl.Rectangle{0, screen_h - FOOTER_H, screen_w, FOOTER_H}
 		rl.DrawRectangleRec(footer_area, rl.Color{15, 15, 22, 255})
-		if len(parser.last_error) > 0 {
-			ui_draw_text(
-				fmt.ctprintf("%s", parser.last_error),
-				12,
-				i32(footer_area.y) + 7,
-				14,
-				rl.Color{255, 110, 110, 255},
-			)
+		err_msg: cstring
+		if sequencer.tick_errors.pool_exhausted {
+			err_msg = "sequencer: runtime pool exhausted; dropping events"
+		} else if len(parser.last_error) > 0 {
+			err_msg = fmt.ctprintf("%s", parser.last_error)
+		}
+		if err_msg != nil {
+			ui_draw_text(err_msg, 12, i32(footer_area.y) + 7, 14, rl.Color{255, 110, 110, 255})
 		}
 		ui_draw_text(
 			"[TAB] toggle debug",
