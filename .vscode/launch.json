@@ -2,22 +2,31 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
-			"name": "Debug midiseq",
+			"name": "MidiSeq Debug",
 			"type": "lldb",
 			"request": "launch",
 			"program": "${workspaceFolder}/midiseq",
 			"args": [],
 			"cwd": "${workspaceFolder}",
-			"preLaunchTask": "odin build (debug)"
+			"preLaunchTask": "MidiSeq Debug"
 		},
 		{
-			"name": "Run midiseq (release)",
+			"name": "MidiSeq Release",
 			"type": "lldb",
 			"request": "launch",
 			"program": "${workspaceFolder}/midiseq-release",
 			"args": [],
 			"cwd": "${workspaceFolder}",
-			"preLaunchTask": "odin build (release)"
+			"preLaunchTask": "MidiSeq Release"
+		},
+		{
+			"name": "MidiSeq Debug Optimized",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/midiseq-relwithdebinfo",
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "MidiSeq Debug Optimized"
 		}
 	]
 }

@@ -1,6 +1,8 @@
 # Build output
 midiseq
-midiseq.dSYM/
+midiseq-release
+midiseq-relwithdebinfo
+*.dSYM/
 *.o
 *.obj
 *.exe

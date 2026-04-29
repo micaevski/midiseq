@@ -2,7 +2,7 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "odin build (debug)",
+			"label": "MidiSeq Debug",
 			"type": "shell",
 			"command": "odin",
 			"args": ["build", ".", "-debug", "-out:midiseq"],
@@ -13,10 +13,18 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "odin build (release)",
+			"label": "MidiSeq Release",
 			"type": "shell",
 			"command": "odin",
 			"args": ["build", ".", "-o:speed", "-out:midiseq-release"],
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "MidiSeq Debug Optimized",
+			"type": "shell",
+			"command": "odin",
+			"args": ["build", ".", "-o:speed", "-debug", "-out:midiseq-relwithdebinfo"],
 			"group": "build",
 			"problemMatcher": []
 		}
