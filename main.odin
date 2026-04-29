@@ -10,6 +10,36 @@ SONG_PATH :: "song.midiseq"
 TEMP_ARENA_BYTES :: 1 * 1024 * 1024
 
 
+draw_perf_counter :: proc(frame_ms: f32, fps: i32, area: rl.Rectangle) {
+	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
+	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
+
+	ui_draw_text("FRAME", i32(area.x) + 14, i32(area.y) + 10, 14, rl.Color{140, 140, 160, 255})
+
+	text := fmt.ctprintf("%.2f ms", frame_ms)
+	size: i32 = 32
+	width := ui_measure_text(text, size)
+	ui_draw_text(
+		text,
+		i32(area.x + area.width / 2) - width / 2,
+		i32(area.y) + 30,
+		size,
+		rl.Color{180, 230, 180, 255},
+	)
+
+	fps_text := fmt.ctprintf("%d fps", fps)
+	fps_size: i32 = 16
+	fps_w := ui_measure_text(fps_text, fps_size)
+	ui_draw_text(
+		fps_text,
+		i32(area.x + area.width / 2) - fps_w / 2,
+		i32(area.y) + 70,
+		fps_size,
+		rl.Color{140, 180, 140, 255},
+	)
+}
+
+
 draw_beat_counter :: proc(beat: f32, area: rl.Rectangle) {
 	rl.DrawRectangleRounded(area, 0.15, 8, rl.Color{30, 30, 42, 255})
 	rl.DrawRectangleRoundedLinesEx(area, 0.15, 8, 1.5, rl.Color{70, 70, 90, 255})
@@ -111,11 +141,13 @@ main :: proc() {
 
 	playing := true
 	show_debug := false
+	frame_ms_ema: f32 = 0
 
 	context.allocator = ensure_no_more_allocations()
 
 	for !rl.WindowShouldClose() {
 		dt := rl.GetFrameTime()
+		frame_ms_ema = frame_ms_ema * 0.9 + dt * 1000 * 0.1
 		if rl.IsKeyPressed(.TAB) do show_debug = !show_debug
 		if rl.IsKeyPressed(.SPACE) {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
@@ -182,6 +214,14 @@ main :: proc() {
 		screen_h := f32(rl.GetScreenHeight())
 
 		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 20, BEAT_W, 100})
+		if show_debug {
+			PERF_W :: f32(200)
+			draw_perf_counter(
+				frame_ms_ema,
+				rl.GetFPS(),
+				rl.Rectangle{screen_w - BEAT_W - 20 - PERF_W - 12, 20, PERF_W, 100},
+			)
+		}
 
 		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
 		if show_debug {
