@@ -134,7 +134,7 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string
 }
 
 
-try_start :: proc(s: ^seq.Sequencer, midi: ^Midi_Out) {
+try_start :: proc(s: ^seq.Sequencer, midi: ^Midi_IO) {
 	if s.source_root != seq.NIL_SOURCE {
 		seq.start(s)
 		midi_reset(midi)
@@ -157,14 +157,22 @@ main :: proc() {
 	mem.arena_init(&temp_arena, temp_buf)
 	context.temp_allocator = mem.arena_allocator(&temp_arena)
 
-	midi: Midi_Out
-	if !midi_open(&midi) do return
-	defer midi_close(&midi)
+	devices: Midi_Devices
+	midi: Midi_IO
+	if !midi_init(&devices) do return
+	defer midi_terminate(&midi)
+
+	config: Config
+	config_load(&config, CONFIG_PATH)
+	in_active := i32(midi_devices_find_in_index(&devices, config_in(&config)))
+	out_active := i32(midi_devices_find_out_index(&devices, config_out(&config)))
+	midi_open_input_by_index(&midi, &devices, int(in_active))
+	midi_open_output_by_index(&midi, &devices, int(out_active))
 
 	sequencer := seq.make_sequencer()
 	defer seq.destroy_sequencer(&sequencer)
 	sequencer.sink = midi_sink(&midi)
-	sequencer.tempo = 120
+	sequencer.tempo = config.tempo
 
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
@@ -190,6 +198,8 @@ main :: proc() {
 	playing := true
 	show_debug := false
 	frame_ms_ema: f32 = 0
+	in_dropdown_open := false
+	out_dropdown_open := false
 
 	context.allocator = ensure_no_more_allocations()
 
@@ -226,19 +236,32 @@ main :: proc() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 
-		if rl.GuiButton(rl.Rectangle{20, 20, 100, 40}, "Start") {
+		// Labels for the MIDI dropdowns. The dropdown widgets themselves
+		// are drawn at the END of the frame so their expanded option
+		// lists overlay every other widget instead of being painted
+		// over.
+		ui_draw_text("MIDI In", 20, 24, 14, rl.Color{180, 180, 200, 255})
+		ui_draw_text("MIDI Out", 380, 24, 14, rl.Color{180, 180, 200, 255})
+
+		// Lock all other gui controls while a dropdown is open so clicks
+		// inside the expanded list don't fall through to underlying
+		// buttons.
+		any_dropdown_open := in_dropdown_open || out_dropdown_open
+		if any_dropdown_open do rl.GuiLock()
+
+		if rl.GuiButton(rl.Rectangle{20, 60, 100, 40}, "Start") {
 			if seq.finished(&sequencer) {
 				try_start(&sequencer, &midi)
 			}
 			playing = true
 		}
-		if rl.GuiButton(rl.Rectangle{140, 20, 100, 40}, "Pause") {
+		if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") {
 			if playing {
 				seq.silence(&sequencer)
 			}
 			playing = false
 		}
-		if rl.GuiButton(rl.Rectangle{260, 20, 100, 40}, "Stop") {
+		if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") {
 			seq.silence(&sequencer)
 			try_start(&sequencer, &midi)
 			playing = false
@@ -246,23 +269,27 @@ main :: proc() {
 
 		tempo_label := fmt.ctprintf("%.0f BPM", sequencer.tempo)
 		rl.GuiSlider(
-			rl.Rectangle{120, 100, 280, 20},
+			rl.Rectangle{120, 120, 280, 20},
 			"Tempo",
 			tempo_label,
 			&sequencer.tempo,
 			40,
 			240,
 		)
+		if rl.IsMouseButtonReleased(.LEFT) && sequencer.tempo != config.tempo {
+			config.tempo = sequencer.tempo
+			config_save(&config, CONFIG_PATH)
+		}
 
 		// Dashboard occupies the top DASHBOARD_H px and stays fixed; the
 		// viz area below stretches with the window.
-		DASHBOARD_H :: f32(160)
+		DASHBOARD_H :: f32(180)
 		FOOTER_H :: f32(28)
 		BEAT_W :: f32(180)
 		screen_w := f32(rl.GetScreenWidth())
 		screen_h := f32(rl.GetScreenHeight())
 
-		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 20, BEAT_W, 100})
+		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 60, BEAT_W, 100})
 
 		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
 		if show_debug {
@@ -320,6 +347,44 @@ main :: proc() {
 			14,
 			rl.GRAY,
 		)
+
+		// MIDI device dropdowns drawn last so the expanded option list
+		// floats over the rest of the dashboard. Unlock first because
+		// the lock is meant for the rest of the controls only.
+		if any_dropdown_open do rl.GuiUnlock()
+
+		in_text := cstring(&devices.in_dropdown[0])
+		out_text := cstring(&devices.out_dropdown[0])
+
+		in_prev := in_active
+		if rl.GuiDropdownBox(
+			rl.Rectangle{80, 18, 280, 28},
+			in_text,
+			&in_active,
+			in_dropdown_open,
+		) {
+			in_dropdown_open = !in_dropdown_open
+		}
+		if in_active != in_prev {
+			midi_open_input_by_index(&midi, &devices, int(in_active))
+			config_set_in(&config, midi_in_name(&midi))
+			config_save(&config, CONFIG_PATH)
+		}
+
+		out_prev := out_active
+		if rl.GuiDropdownBox(
+			rl.Rectangle{450, 18, 280, 28},
+			out_text,
+			&out_active,
+			out_dropdown_open,
+		) {
+			out_dropdown_open = !out_dropdown_open
+		}
+		if out_active != out_prev {
+			midi_open_output_by_index(&midi, &devices, int(out_active))
+			config_set_out(&config, midi_out_name(&midi))
+			config_save(&config, CONFIG_PATH)
+		}
 
 		rl.EndDrawing()
 		free_all(context.temp_allocator)

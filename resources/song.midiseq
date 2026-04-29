@@ -31,8 +31,9 @@ BASS! 3
 SONG:
 HAT chan=3 rate=1
 KICK chan=3
-SNARE chan=3
+SNARE chan=3    
 BASS chan=2 scale=CPm rate=2
+BASS chan=2 scale=CPm rate=2 trans=3d
 SONG! 33
 
 SONG     
