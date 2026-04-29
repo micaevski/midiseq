@@ -5,7 +5,7 @@ import "core:math/rand"
 import "core:mem"
 
 
-DEFAULT_POOL_BYTES :: 1_000_000 * size_of(Runtime_Event)
+DEFAULT_POOL_BYTES :: 100_000 * size_of(Runtime_Event)
 NAMES_ARENA_BYTES :: 16 * 1024
 
 STEPS_PER_BEAT :: 4096
