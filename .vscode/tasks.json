@@ -11,6 +11,14 @@
 				"isDefault": true
 			},
 			"problemMatcher": []
+		},
+		{
+			"label": "odin build (release)",
+			"type": "shell",
+			"command": "odin",
+			"args": ["build", ".", "-o:speed", "-out:midiseq-release"],
+			"group": "build",
+			"problemMatcher": []
 		}
 	]
 }

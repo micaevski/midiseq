@@ -9,6 +9,15 @@
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"preLaunchTask": "odin build (debug)"
+		},
+		{
+			"name": "Run midiseq (release)",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/midiseq-release",
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "odin build (release)"
 		}
 	]
 }
