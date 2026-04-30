@@ -119,7 +119,7 @@ draw_beat_counter :: proc(beat: f32, area: rl.Rectangle) {
 // in-flight notes intact. If the active chain is empty (initial load
 // or everything got retired), spawn a fresh root via `start_sequencer`.
 // Sequencer is left untouched on parse or read failure.
-reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string) -> bool {
+reload_song :: proc(sequencer: seq.Sequencer_Handle, parser: ^seq.Parser, path: string) -> bool {
 	new_root, ok := seq.parse_file(parser, path)
 	if !ok do return false
 
@@ -127,18 +127,16 @@ reload_song :: proc(sequencer: ^seq.Sequencer, parser: ^seq.Parser, path: string
 	// names.by_name, both alive at this point).
 	seq.adapt_to_source(sequencer, parser, new_root)
 
-	if sequencer.active_head == seq.NIL_RUNTIME {
+	if seq.finished(sequencer) {
 		seq.start(sequencer)
 	}
 	return true
 }
 
 
-try_start :: proc(s: ^seq.Sequencer, midi: ^Midi_IO) {
-	if s.source_root != seq.NIL_SOURCE {
-		seq.start(s)
-		midi_reset(midi)
-	}
+try_start :: proc(s: seq.Sequencer_Handle, midi: ^Midi_IO) {
+	seq.start(s)
+	midi_reset(midi)
 }
 
 
@@ -177,9 +175,8 @@ main :: proc() {
 		config_save(&config, CONFIG_PATH)
 	}
 
-	sequencer := seq.make_sequencer()
-	defer seq.destroy_sequencer(&sequencer)
-	sequencer.sink = midi_sink(&midi)
+	sequencer := seq.make_sequencer(midi_sink(&midi))
+	defer seq.destroy_sequencer(sequencer)
 
 	clock: seq.Clock
 	clock.tempo = config.tempo
@@ -188,7 +185,7 @@ main :: proc() {
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
 
-	reload_song(&sequencer, &parser, SONG_PATH)
+	reload_song(sequencer, &parser, SONG_PATH)
 
 	watcher := File_Watcher {
 		path = SONG_PATH,
@@ -202,9 +199,6 @@ main :: proc() {
 
 	load_ui_font()
 	defer unload_ui_font()
-
-	vis := make_visualizer()
-	defer destroy_visualizer(&vis)
 
 	playing := true
 	show_debug := false
@@ -225,22 +219,22 @@ main :: proc() {
 		if rl.IsKeyPressed(.SPACE) {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			if shift {
-				if seq.finished(&sequencer) {
-					try_start(&sequencer, &midi)
+				if seq.finished(sequencer) {
+					try_start(sequencer, &midi)
 				}
 				playing = true
 			} else if playing {
-				seq.silence(&sequencer)
+				seq.silence(sequencer)
 				playing = false
 			} else {
-				seq.silence(&sequencer)
-				try_start(&sequencer, &midi)
+				seq.silence(sequencer)
+				try_start(sequencer, &midi)
 				playing = true
 			}
 		}
 
 		if file_watcher_poll(&watcher) {
-			reload_song(&sequencer, &parser, SONG_PATH)
+			reload_song(sequencer, &parser, SONG_PATH)
 		}
 
 		// Drain any incoming MIDI messages. The clock owns all timing
@@ -254,10 +248,10 @@ main :: proc() {
 			if clock.mode == .External {
 				switch event {
 				case .Start:
-					seq.start(&sequencer)
+					seq.start(sequencer)
 					midi_reset(&midi)
 				case .Stop:
-					seq.silence(&sequencer)
+					seq.silence(sequencer)
 				case .None, .Tick, .Continue, .Song_Position:
 				}
 			}
@@ -265,8 +259,8 @@ main :: proc() {
 		}
 		seq.clock_tick(&clock, dt, playing)
 
-		if playing && seq.clock_is_running(&clock) && !seq.finished(&sequencer) {
-			seq.tick(&sequencer, clock.beat)
+		if playing && seq.clock_is_running(&clock) && !seq.finished(sequencer) {
+			seq.tick(sequencer, clock.beat)
 		}
 		midi_end_frame(&midi, dt)
 
@@ -287,20 +281,20 @@ main :: proc() {
 		if any_dropdown_open do rl.GuiLock()
 
 		if rl.GuiButton(rl.Rectangle{20, 60, 100, 40}, "Start") {
-			if seq.finished(&sequencer) {
-				try_start(&sequencer, &midi)
+			if seq.finished(sequencer) {
+				try_start(sequencer, &midi)
 			}
 			playing = true
 		}
 		if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") {
 			if playing {
-				seq.silence(&sequencer)
+				seq.silence(sequencer)
 			}
 			playing = false
 		}
 		if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") {
-			seq.silence(&sequencer)
-			try_start(&sequencer, &midi)
+			seq.silence(sequencer)
+			try_start(sequencer, &midi)
 			playing = false
 		}
 
@@ -333,7 +327,7 @@ main :: proc() {
 		screen_w := f32(rl.GetScreenWidth())
 		screen_h := f32(rl.GetScreenHeight())
 
-		draw_beat_counter(sequencer.beat, rl.Rectangle{screen_w - BEAT_W - 20, 60, BEAT_W, 100})
+		draw_beat_counter(seq.sequencer_beat(sequencer), rl.Rectangle{screen_w - BEAT_W - 20, 60, BEAT_W, 100})
 
 		viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
 		if show_debug {
@@ -355,29 +349,31 @@ main :: proc() {
 			when ODIN_DEBUG {
 				draw_midi_counter(midi.events_per_sec, card(row_x, row_y, CARD_W, CARD_H, GAP, 1))
 			}
+			mem := seq.sequencer_memory(sequencer)
 			draw_pool_counter(
 				"RUNTIME",
-				i64(sequencer.runtime_pool.in_use),
-				i64(seq.runtime_pool_capacity(&sequencer.runtime_pool)),
+				i64(mem.runtime_in_use),
+				i64(mem.runtime_capacity),
 				rl.Color{180, 220, 255, 255},
 				card(row_x, row_y, CARD_W, CARD_H, GAP, 2),
 			)
 			draw_pool_counter(
 				"SOURCE",
-				i64(len(sequencer.source) - 1),
-				i64(cap(sequencer.source) - 1),
+				i64(mem.source_in_use),
+				i64(mem.source_capacity),
 				rl.Color{200, 180, 255, 255},
 				card(row_x, row_y, CARD_W, CARD_H, GAP, 3),
 			)
-		} else {
-			draw_active(&vis, &sequencer, viz_area, dt)
 		}
 
 		footer_area := rl.Rectangle{0, screen_h - FOOTER_H, screen_w, FOOTER_H}
 		rl.DrawRectangleRec(footer_area, rl.Color{15, 15, 22, 255})
 		err_msg: cstring
-		if sequencer.tick_errors.pool_exhausted {
+		runtime_err := seq.sequencer_runtime_error(sequencer)
+		if runtime_err.pool_exhausted {
 			err_msg = "sequencer: runtime pool exhausted; dropping events"
+		} else if runtime_err.empty {
+			err_msg = "sequencer: nothing loaded"
 		} else if len(parser.last_error) > 0 {
 			err_msg = fmt.ctprintf("%s", parser.last_error)
 		}
@@ -434,7 +430,7 @@ main :: proc() {
 		free_all(context.temp_allocator)
 	}
 
-	seq.silence(&sequencer)
+	seq.silence(sequencer)
 	rl.WaitTime(0.05)
 
 	// Restore so the deferred destroy_* calls can free with the same
