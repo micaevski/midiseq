@@ -1,13 +1,17 @@
 package seq
 
 
+// =============================================================================
+// Public API
+// =============================================================================
+
 Clock_Mode :: enum {
 	Internal,
 	External,
 }
 
 // Events the clock cares about. Other MIDI messages are filtered out
-// at the source by midi_read before they reach clock_event.
+// at the source by midi_read before they reach clock_process_event.
 Clock_Event :: enum {
 	None,
 	Tick, // 0xF8 timing clock
@@ -17,26 +21,34 @@ Clock_Event :: enum {
 	Song_Position, // 0xF2 (data carries 16th-note position)
 }
 
-// Clock owns the canonical beat and tempo. In internal mode the beat
-// advances from dt × tempo. In external mode the beat is derived from
-// MIDI clock pulses (PPQN = 24, so beat = pulses / 24).
-Clock :: struct {
-	mode:         Clock_Mode,
-	beat:         f32,
-	tempo:        f32,
-	pulses:       u32,
-	running:      bool,
-	last_pulse_t: f64,
-	bpm_ema:      f32,
+
+// Opaque handle exported as the package's public clock type.
+Clock_Handle :: ^Clock
+
+
+// Snapshot of the clock's observable state. Inspect via `clock_status`.
+Clock_Status :: struct {
+	mode:    Clock_Mode,
+	running: bool, // DAW says transport is running (always true in Internal)
+	beat:    f32,
+	tempo:   f32,
+	bpm_ema: f32, // smoothed inferred tempo from MIDI clock pulses
 }
 
 
-clock_is_running :: proc(c: ^Clock) -> bool {
-	return c.mode == .Internal || c.running
+make_clock :: proc(tempo: f32 = 120, mode: Clock_Mode = .Internal) -> Clock_Handle {
+	c := new(Clock)
+	c.tempo = tempo
+	c.mode = mode
+	return c
+}
+
+destroy_clock :: proc(c: Clock_Handle) {
+	free(c)
 }
 
 
-clock_event :: proc(c: ^Clock, event: Clock_Event, data: i32, now: f64) {
+clock_process_event :: proc(c: Clock_Handle, event: Clock_Event, data: i32, now: f64) {
 	switch event {
 	case .None:
 	case .Tick:
@@ -65,7 +77,7 @@ clock_event :: proc(c: ^Clock, event: Clock_Event, data: i32, now: f64) {
 }
 
 
-clock_tick :: proc(c: ^Clock, dt: f32, playing: bool) {
+clock_tick :: proc(c: Clock_Handle, dt: f32, playing: bool) {
 	switch c.mode {
 	case .Internal:
 		if playing do c.beat += dt * c.tempo / 60.0
@@ -73,4 +85,47 @@ clock_tick :: proc(c: ^Clock, dt: f32, playing: bool) {
 		c.beat = f32(c.pulses) / 24.0
 		if c.bpm_ema > 0 do c.tempo = c.bpm_ema
 	}
+}
+
+
+clock_is_running :: proc(c: Clock_Handle) -> bool {
+	return c.mode == .Internal || c.running
+}
+
+
+clock_status :: proc(c: Clock_Handle) -> Clock_Status {
+	return Clock_Status {
+		mode = c.mode,
+		running = c.running,
+		beat = c.beat,
+		tempo = c.tempo,
+		bpm_ema = c.bpm_ema,
+	}
+}
+
+clock_set_tempo :: proc(c: Clock_Handle, tempo: f32) {
+	c.tempo = tempo
+}
+
+clock_set_mode :: proc(c: Clock_Handle, mode: Clock_Mode) {
+	c.mode = mode
+}
+
+
+// =============================================================================
+// Internals
+// =============================================================================
+
+// Clock owns the canonical beat and tempo. In internal mode the beat
+// advances from dt × tempo. In external mode the beat is derived from
+// MIDI clock pulses (PPQN = 24, so beat = pulses / 24).
+@(private)
+Clock :: struct {
+	mode:         Clock_Mode,
+	beat:         f32,
+	tempo:        f32,
+	pulses:       u32,
+	running:      bool,
+	last_pulse_t: f64,
+	bpm_ema:      f32,
 }
