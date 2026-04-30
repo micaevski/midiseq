@@ -83,7 +83,11 @@ start :: proc(sequencer: Sequencer_Handle) {
 	sequencer.active_tail = NIL_RUNTIME
 	sequencer.finished_head = NIL_RUNTIME
 	sequencer.playing_notes = {}
-	sequencer.last_emit_beat = {}
+	// Initialize the throttle to -inf on every slot so the first emit
+	// always fires; otherwise an emit at beat 0 (notes anchored at the
+	// start of a song) sees `last_emit + BEAT_QUANTUM = 0 + tiny` and
+	// gets suppressed before it ever played.
+	for ch in 0 ..< 16 do for n in 0 ..< 128 do sequencer.last_emit_beat[ch][n] = math.inf_f32(-1)
 
 	if sequencer.source_root == NIL_SOURCE {
 		sequencer.runtime_error.empty = true
