@@ -1,3 +1,10 @@
+YES
 * cc events
-* if-else block checking values on timelines ( BASS.trans < 5 BASS.note >= C6)
-* arithmatic expressions on macro parameters
+* hand rolled midi abstraction layer
+* CLI interface 
+
+
+Maybe
+* arithmatic expressions on macro parameters ?
+* CLI Visuals
+
