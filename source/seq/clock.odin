@@ -28,11 +28,12 @@ Clock_Handle :: ^Clock
 
 // Snapshot of the clock's observable state. Inspect via `clock_status`.
 Clock_Status :: struct {
-	mode:    Clock_Mode,
-	running: bool, // DAW says transport is running (always true in Internal)
-	beat:    f32,
-	tempo:   f32,
-	bpm_ema: f32, // smoothed inferred tempo from MIDI clock pulses
+	mode:             Clock_Mode,
+	external_running: bool, // External-only: DAW transport is rolling. Always false in Internal.
+	playing:          bool, // local play/pause state (driven by user)
+	beat:             f32,
+	tempo:            f32,
+	bpm_ema:          f32, // smoothed inferred tempo from MIDI clock pulses
 }
 
 
@@ -40,6 +41,7 @@ make_clock :: proc(tempo: f32 = 120, mode: Clock_Mode = .Internal) -> Clock_Hand
 	c := new(Clock)
 	c.tempo = tempo
 	c.mode = mode
+	c.playing = true
 	return c
 }
 
@@ -64,12 +66,12 @@ clock_process_event :: proc(c: Clock_Handle, event: Clock_Event, data: i32, now:
 		c.last_pulse_t = now
 	case .Start:
 		c.pulses = 0
-		c.running = true
+		c.external_running = true
 		c.beat = 0
 	case .Continue:
-		c.running = true
+		c.external_running = true
 	case .Stop:
-		c.running = false
+		c.external_running = false
 	case .Song_Position:
 		c.pulses = u32(data) * 6
 		c.beat = f32(c.pulses) / 24.0
@@ -77,10 +79,10 @@ clock_process_event :: proc(c: Clock_Handle, event: Clock_Event, data: i32, now:
 }
 
 
-clock_tick :: proc(c: Clock_Handle, dt: f32, playing: bool) {
+clock_tick :: proc(c: Clock_Handle, dt: f32) {
 	switch c.mode {
 	case .Internal:
-		if playing do c.beat += dt * c.tempo / 60.0
+		if c.playing do c.beat += dt * c.tempo / 60.0
 	case .External:
 		c.beat = f32(c.pulses) / 24.0
 		if c.bpm_ema > 0 do c.tempo = c.bpm_ema
@@ -88,15 +90,18 @@ clock_tick :: proc(c: Clock_Handle, dt: f32, playing: bool) {
 }
 
 
+// True when the clock should be driving the sequencer: the user has
+// pressed play, and (in External mode) the DAW transport is rolling.
 clock_is_running :: proc(c: Clock_Handle) -> bool {
-	return c.mode == .Internal || c.running
+	return c.playing && (c.mode == .Internal || c.external_running)
 }
 
 
 clock_status :: proc(c: Clock_Handle) -> Clock_Status {
 	return Clock_Status {
 		mode = c.mode,
-		running = c.running,
+		external_running = c.external_running,
+		playing = c.playing,
 		beat = c.beat,
 		tempo = c.tempo,
 		bpm_ema = c.bpm_ema,
@@ -111,6 +116,10 @@ clock_set_mode :: proc(c: Clock_Handle, mode: Clock_Mode) {
 	c.mode = mode
 }
 
+clock_set_playing :: proc(c: Clock_Handle, playing: bool) {
+	c.playing = playing
+}
+
 
 // =============================================================================
 // Internals
@@ -121,11 +130,12 @@ clock_set_mode :: proc(c: Clock_Handle, mode: Clock_Mode) {
 // MIDI clock pulses (PPQN = 24, so beat = pulses / 24).
 @(private)
 Clock :: struct {
-	mode:         Clock_Mode,
-	beat:         f32,
-	tempo:        f32,
-	pulses:       u32,
-	running:      bool,
-	last_pulse_t: f64,
-	bpm_ema:      f32,
+	mode:             Clock_Mode,
+	beat:             f32,
+	tempo:            f32,
+	pulses:           u32,
+	external_running: bool,
+	playing:          bool,
+	last_pulse_t:     f64,
+	bpm_ema:          f32,
 }

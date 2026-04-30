@@ -32,10 +32,8 @@ Midi_Devices :: struct {
 }
 
 // Thin wrapper around PortMIDI input + output streams. The sequencer
-// owns per-(channel, pitch) ownership and decides when a physical
-// note-off is needed; this layer just emits messages, gated by a
-// per-key musical-time throttle to keep MIDI volume under what the
-// synth can drain.
+// owns all musical-time logic (overlap detection, throttling, runtime
+// ownership); this layer just emits messages.
 @(private = "file")
 IN_BUF_LEN :: 128
 
@@ -47,17 +45,12 @@ Midi_IO :: struct {
 	in_buf:          [IN_BUF_LEN]pm.Event,
 	in_buf_count:    int,
 	in_buf_pos:      int,
-	last_emit_beat:  [16][128]f32,
-	playing:         [16][128]bool,
 	events_in_frame: u32,
 	rate_count_ring: [RATE_HISTORY]u32,
 	rate_dt_ring:    [RATE_HISTORY]f32,
 	rate_head:       u32,
 	events_per_sec:  f32,
 }
-
-
-THROTTLE_THRESHOLD :: seq.BEAT_QUANTUM
 
 
 midi_init :: proc(devices: ^Midi_Devices) -> bool {
@@ -79,9 +72,15 @@ midi_terminate :: proc(midi: ^Midi_IO) {
 @(private = "file")
 enumerate_devices :: proc(devices: ^Midi_Devices) {
 	devices^ = {}
-	devices.in_devices[0] = Midi_Device{id = pm.NoDevice, name = "(none)"}
+	devices.in_devices[0] = Midi_Device {
+		id   = pm.NoDevice,
+		name = "(none)",
+	}
 	devices.in_count = 1
-	devices.out_devices[0] = Midi_Device{id = pm.NoDevice, name = "(none)"}
+	devices.out_devices[0] = Midi_Device {
+		id   = pm.NoDevice,
+		name = "(none)",
+	}
 	devices.out_count = 1
 
 	count := pm.CountDevices()
@@ -243,11 +242,6 @@ midi_out_name :: proc(midi: ^Midi_IO) -> string {
 }
 
 
-midi_reset :: proc(midi: ^Midi_IO) {
-	midi.last_emit_beat = {}
-	midi.playing = {}
-}
-
 midi_end_frame :: proc(midi: ^Midi_IO, dt: f32) {
 	when ODIN_DEBUG {
 		midi.rate_count_ring[midi.rate_head] = midi.events_in_frame
@@ -285,26 +279,16 @@ midi_sink :: proc(midi: ^Midi_IO) -> seq.Sink {
 
 midi_note_on :: proc(midi: ^Midi_IO, channel, number, velocity: i32, beat: f32) {
 	if midi.out_stream == nil do return
-	if channel < 0 || channel >= 16 do return
-	if number < 0 || number >= 128 do return
-	last := midi.last_emit_beat[channel][number]
-	if beat <= last + THROTTLE_THRESHOLD do return
 	pm.WriteShort(
 		midi.out_stream,
 		0,
 		pm.MessageMake(0x90 | c.int(channel), c.int(number), c.int(velocity)),
 	)
-	midi.last_emit_beat[channel][number] = beat
-	midi.playing[channel][number] = true
-	when ODIN_DEBUG do midi.events_in_frame += 1
+	midi.events_in_frame += 1
 }
 
 midi_note_off :: proc(midi: ^Midi_IO, channel, number: i32, beat: f32) {
 	if midi.out_stream == nil do return
-	if channel < 0 || channel >= 16 do return
-	if number < 0 || number >= 128 do return
-	if !midi.playing[channel][number] do return
 	pm.WriteShort(midi.out_stream, 0, pm.MessageMake(0x80 | c.int(channel), c.int(number), 0))
-	midi.playing[channel][number] = false
-	when ODIN_DEBUG do midi.events_in_frame += 1
+	midi.events_in_frame += 1
 }

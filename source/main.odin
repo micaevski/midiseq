@@ -134,12 +134,6 @@ reload_song :: proc(sequencer: seq.Sequencer_Handle, parser: ^seq.Parser, path: 
 }
 
 
-try_start :: proc(s: seq.Sequencer_Handle, midi: ^Midi_IO) {
-	seq.start(s)
-	midi_reset(midi)
-}
-
-
 Gui_State :: struct {
 	show_debug:        bool,
 	frame_ms_ema:      f32,
@@ -161,7 +155,6 @@ draw_gui :: proc(
 	midi: ^Midi_IO,
 	devices: ^Midi_Devices,
 	config: ^Config,
-	playing: ^bool,
 ) {
 	// Labels for the MIDI dropdowns. The dropdown widgets themselves
 	// are drawn at the END of the frame so their expanded option
@@ -178,20 +171,20 @@ draw_gui :: proc(
 
 	if rl.GuiButton(rl.Rectangle{20, 60, 100, 40}, "Start") {
 		if seq.finished(sequencer) {
-			try_start(sequencer, midi)
+			seq.start(sequencer)
 		}
-		playing^ = true
+		seq.clock_set_playing(clock, true)
 	}
 	if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") {
-		if playing^ {
+		if seq.clock_status(clock).playing {
 			seq.silence(sequencer)
 		}
-		playing^ = false
+		seq.clock_set_playing(clock, false)
 	}
 	if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") {
 		seq.silence(sequencer)
-		try_start(sequencer, midi)
-		playing^ = false
+		seq.start(sequencer)
+		seq.clock_set_playing(clock, false)
 	}
 
 	clock_status := seq.clock_status(clock)
@@ -204,7 +197,7 @@ draw_gui :: proc(
 		config_save(config, CONFIG_PATH)
 	}
 	if external {
-		status: cstring = clock_status.running ? "running" : "stopped"
+		status: cstring = clock_status.external_running ? "running" : "stopped"
 		label := fmt.ctprintf("ext: %.1f BPM (%s)", clock_status.bpm_ema, status)
 		ui_draw_text(label, 540, 74, 14, rl.Color{180, 180, 200, 255})
 	}
@@ -386,8 +379,6 @@ main :: proc() {
 	load_ui_font()
 	defer unload_ui_font()
 
-	playing := true
-
 	// Save the heap allocator so we can restore it after the main loop;
 	// otherwise the defers above run with panic_allocator and trip on
 	// their `delete` calls.
@@ -400,18 +391,19 @@ main :: proc() {
 		if rl.IsKeyPressed(.TAB) do ui.show_debug = !ui.show_debug
 		if rl.IsKeyPressed(.SPACE) {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+			playing := seq.clock_status(clock).playing
 			if shift {
 				if seq.finished(sequencer) {
-					try_start(sequencer, &midi)
+					seq.start(sequencer)
 				}
-				playing = true
+				seq.clock_set_playing(clock, true)
 			} else if playing {
 				seq.silence(sequencer)
-				playing = false
+				seq.clock_set_playing(clock, false)
 			} else {
 				seq.silence(sequencer)
-				try_start(sequencer, &midi)
-				playing = true
+				seq.start(sequencer)
+				seq.clock_set_playing(clock, true)
 			}
 		}
 
@@ -432,7 +424,6 @@ main :: proc() {
 				switch event {
 				case .Start:
 					seq.start(sequencer)
-					midi_reset(&midi)
 				case .Stop:
 					seq.silence(sequencer)
 				case .None, .Tick, .Continue, .Song_Position:
@@ -440,16 +431,16 @@ main :: proc() {
 			}
 			seq.clock_process_event(clock, event, data, now)
 		}
-		seq.clock_tick(clock, dt, playing)
+		seq.clock_tick(clock, dt)
 
-		if playing && seq.clock_is_running(clock) && !seq.finished(sequencer) {
+		if seq.clock_is_running(clock) && !seq.finished(sequencer) {
 			seq.tick(sequencer, seq.clock_status(clock).beat)
 		}
 		midi_end_frame(&midi, dt)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
-		draw_gui(&ui, sequencer, clock, &parser, &midi, &devices, &config, &playing)
+		draw_gui(&ui, sequencer, clock, &parser, &midi, &devices, &config)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}

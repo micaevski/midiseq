@@ -82,6 +82,8 @@ start :: proc(sequencer: Sequencer_Handle) {
 	sequencer.active_head = NIL_RUNTIME
 	sequencer.active_tail = NIL_RUNTIME
 	sequencer.finished_head = NIL_RUNTIME
+	sequencer.playing_notes = {}
+	sequencer.last_emit_beat = {}
 
 	if sequencer.source_root == NIL_SOURCE {
 		sequencer.runtime_error.empty = true
@@ -284,17 +286,22 @@ sequencer_memory :: proc(s: Sequencer_Handle) -> Memory_Status {
 // above.
 @(private)
 Sequencer :: struct {
-	beat:          f32,
-	source_root:   Source_Index,
-	active_head:   Runtime_Index,
-	active_tail:   Runtime_Index,
-	finished_head: Runtime_Index,
-	source:        [dynamic]Source_Event,
-	runtime_pool:  Runtime_Pool,
-	sink:          Sink,
-	names:         Names,
-	playing_notes: [16][128]Runtime_Index,
-	runtime_error: Runtime_Error,
+	beat:           f32,
+	source_root:    Source_Index,
+	active_head:    Runtime_Index,
+	active_tail:    Runtime_Index,
+	finished_head:  Runtime_Index,
+	source:         [dynamic]Source_Event,
+	runtime_pool:   Runtime_Pool,
+	sink:           Sink,
+	names:          Names,
+	playing_notes:  [16][128]Runtime_Index,
+	// Per-(channel, pitch) musical-time gate. A note_on emit is suppressed
+	// if the previous emit on the same slot was within BEAT_QUANTUM —
+	// keeps the downstream synth from being saturated by very rapid
+	// retriggers.
+	last_emit_beat: [16][128]f32,
+	runtime_error:  Runtime_Error,
 }
 
 
@@ -571,6 +578,19 @@ play_timeline :: proc(
 				i32(timeline.scale.root),
 				scale_offsets(timeline.scale.kind),
 			)
+			// Per-(channel, pitch) musical-time throttle. Suppress the
+			// emission entirely (no runtime note, no overlap-displace,
+			// no sink call) if the previous emit on this slot was within
+			// BEAT_QUANTUM. The displaced note keeps playing for its
+			// natural duration.
+			if chan >= 0 && chan < 16 && num >= 0 && num < 128 {
+				if runtime_event.beat <=
+				   sequencer.last_emit_beat[chan][num] + BEAT_QUANTUM {
+					runtime_free(&sequencer.runtime_pool, new_idx)
+					timeline.cursor = cursor_event.next
+					continue
+				}
+			}
 			duration := max(quantize(k.duration / timeline.rate), BEAT_QUANTUM)
 			runtime_event.kind = Runtime_Note {
 				number            = num,
@@ -583,6 +603,7 @@ play_timeline :: proc(
 					sequencer.sink.note_off(&sequencer.sink, chan, num, runtime_event.beat)
 				}
 				sequencer.playing_notes[chan][num] = new_idx
+				sequencer.last_emit_beat[chan][num] = runtime_event.beat
 			}
 			sequencer.sink.note_on(&sequencer.sink, chan, num, k.velocity, runtime_event.beat)
 		case Source_Timeline:
