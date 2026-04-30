@@ -16,7 +16,7 @@
 			"label": "MidiSeq Release",
 			"type": "shell",
 			"command": "odin",
-			"args": ["build", "source", "-o:speed", "-out:build/midiseq-release"],
+			"args": ["build", "source", "-o:speed", "-disable-assert", "-out:build/midiseq-release"],
 			"group": "build",
 			"problemMatcher": []
 		},

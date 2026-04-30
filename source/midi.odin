@@ -261,24 +261,24 @@ midi_end_frame :: proc(midi: ^Midi_IO, dt: f32) {
 
 
 // Adaptor: wrap this Midi_IO as a seq.Sink the sequencer can emit through.
-// The sequencer passes the sink itself as the user pointer; we pull the
-// owning Midi_IO back out of `sink.user`.
+// "No output device open" is a normal state owned by this backend, so we
+// silently drop the emit at the boundary; midi_note_on/off below assume
+// a valid stream by construction.
 midi_sink :: proc(midi: ^Midi_IO) -> seq.Sink {
 	on :: proc(user: rawptr, channel, number, velocity: i32, beat: f32) {
-		sink := cast(^seq.Sink)user
-		if sink == nil || sink.user == nil do return
-		midi_note_on(cast(^Midi_IO)sink.user, channel, number, velocity, beat)
+		midi := cast(^Midi_IO)(cast(^seq.Sink)user).user
+		if midi.out_stream == nil do return
+		midi_note_on(midi, channel, number, velocity, beat)
 	}
 	off :: proc(user: rawptr, channel, number: i32, beat: f32) {
-		sink := cast(^seq.Sink)user
-		if sink == nil || sink.user == nil do return
-		midi_note_off(cast(^Midi_IO)sink.user, channel, number, beat)
+		midi := cast(^Midi_IO)(cast(^seq.Sink)user).user
+		if midi.out_stream == nil do return
+		midi_note_off(midi, channel, number, beat)
 	}
 	return seq.Sink{user = midi, note_on = on, note_off = off}
 }
 
 midi_note_on :: proc(midi: ^Midi_IO, channel, number, velocity: i32, beat: f32) {
-	if midi.out_stream == nil do return
 	pm.WriteShort(
 		midi.out_stream,
 		0,
@@ -288,7 +288,6 @@ midi_note_on :: proc(midi: ^Midi_IO, channel, number, velocity: i32, beat: f32) 
 }
 
 midi_note_off :: proc(midi: ^Midi_IO, channel, number: i32, beat: f32) {
-	if midi.out_stream == nil do return
 	pm.WriteShort(midi.out_stream, 0, pm.MessageMake(0x80 | c.int(channel), c.int(number), 0))
 	midi.events_in_frame += 1
 }

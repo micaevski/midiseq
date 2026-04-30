@@ -134,6 +134,39 @@ reload_song :: proc(sequencer: seq.Sequencer_Handle, parser: ^seq.Parser, path: 
 }
 
 
+// Transport actions shared by GUI buttons and the keyboard. `play`
+// resumes (or starts if the sequence finished); `pause` stops emitting
+// but keeps the current beat; `stop` rewinds to beat 0 and pauses;
+// `restart` rewinds to beat 0 and plays.
+
+transport_play :: proc(s: seq.Sequencer_Handle, c: seq.Clock_Handle) {
+	if seq.finished(s) do seq.start(s)
+	seq.clock_set_playing(c, true)
+}
+
+transport_pause :: proc(s: seq.Sequencer_Handle, c: seq.Clock_Handle) {
+	seq.silence(s)
+	seq.clock_set_playing(c, false)
+}
+
+transport_stop :: proc(s: seq.Sequencer_Handle, c: seq.Clock_Handle) {
+	transport_rewind(s, c)
+	seq.clock_set_playing(c, false)
+}
+
+transport_restart :: proc(s: seq.Sequencer_Handle, c: seq.Clock_Handle) {
+	transport_rewind(s, c)
+	seq.clock_set_playing(c, true)
+}
+
+@(private = "file")
+transport_rewind :: proc(s: seq.Sequencer_Handle, c: seq.Clock_Handle) {
+	seq.silence(s)
+	seq.start(s)
+	seq.clock_reset(c)
+}
+
+
 Gui_State :: struct {
 	show_debug:        bool,
 	frame_ms_ema:      f32,
@@ -170,22 +203,12 @@ draw_gui :: proc(
 	if any_dropdown_open do rl.GuiLock()
 
 	if rl.GuiButton(rl.Rectangle{20, 60, 100, 40}, "Start") {
-		if seq.finished(sequencer) {
-			seq.start(sequencer)
-		}
-		seq.clock_set_playing(clock, true)
+		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+		if shift do transport_restart(sequencer, clock)
+		else do transport_play(sequencer, clock)
 	}
-	if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") {
-		if seq.clock_status(clock).playing {
-			seq.silence(sequencer)
-		}
-		seq.clock_set_playing(clock, false)
-	}
-	if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") {
-		seq.silence(sequencer)
-		seq.start(sequencer)
-		seq.clock_set_playing(clock, false)
-	}
+	if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") do transport_pause(sequencer, clock)
+	if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") do transport_stop(sequencer, clock)
 
 	clock_status := seq.clock_status(clock)
 	external := clock_status.mode == .External
@@ -399,19 +422,13 @@ main :: proc() {
 		if rl.IsKeyPressed(.TAB) do ui.show_debug = !ui.show_debug
 		if rl.IsKeyPressed(.SPACE) {
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-			playing := seq.clock_status(clock).playing
-			if shift {
-				if seq.finished(sequencer) {
-					seq.start(sequencer)
-				}
-				seq.clock_set_playing(clock, true)
-			} else if playing {
-				seq.silence(sequencer)
-				seq.clock_set_playing(clock, false)
-			} else {
-				seq.silence(sequencer)
-				seq.start(sequencer)
-				seq.clock_set_playing(clock, true)
+			switch {
+			case shift:
+				transport_play(sequencer, clock)
+			case seq.clock_status(clock).playing:
+				transport_pause(sequencer, clock)
+			case:
+				transport_restart(sequencer, clock)
 			}
 		}
 

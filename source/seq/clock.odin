@@ -41,7 +41,6 @@ make_clock :: proc(tempo: f32 = 120, mode: Clock_Mode = .Internal) -> Clock_Hand
 	c := new(Clock)
 	c.tempo = tempo
 	c.mode = mode
-	c.playing = true
 	return c
 }
 
@@ -118,6 +117,15 @@ clock_set_mode :: proc(c: Clock_Handle, mode: Clock_Mode) {
 
 clock_set_playing :: proc(c: Clock_Handle, playing: bool) {
 	c.playing = playing
+}
+
+// Send the clock back to beat 0. Leaves mode/tempo/playing/external
+// transport state alone — callers (GUI Stop, restart-from-scratch
+// keyboard shortcut) decide how to combine this with seq.start /
+// silence / playing toggles.
+clock_reset :: proc(c: Clock_Handle) {
+	c.beat = 0
+	c.pulses = 0
 }
 
 
