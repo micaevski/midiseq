@@ -1,41 +1,12 @@
-KICK:  
-C3 1 vel = 120
-#KICK! 2 rate=2
-C3 2.5
-C3 3.5 chance=30 vel=10
-C3 4.5 chance=30 vel=20
-KICK! 6
+KICK:
+P1O3 0
 
-HAT:
-A#2 1 vel = 120
-A#2 2.5
-A#2 3.5 chance=30 vel=10
-A#2 4.5 chance=30 vel=20
-HAT 2 rate=1.5 chance=20
-HAT! 6
-
-SNARE:
-F#2 2 vel=120
-F#2 4 vel=120
-SNARE 3 rate=2 chance=40
-F#2 4.76 chance=50 vel=10
-F#2 7 chance=50 vel=10
-SNARE! 7
- 
-BASS:
-P1O2-P1O4     chance=90
-P1O2-P1O4 2   chance=40
-P1O2-P1O4 2.5 chance=20
-BASS! 3
+ON_EACH(t,d):
+$t! 1 
+ON_EACH($t,$d)! 2 trans=$d 
 
 SONG:
-HAT chan=3 rate=1
-KICK chan=3
-SNARE chan=3    
-BASS chan=2 scale=CPm rate=2
-BASS chan=2 scale=CPm rate=2 trans=3d
-SONG! 33
+ON_EACH(KICK,3d) chan=2 scale=CPm
+SONG! 5
 
-SONG     
-
-  
+SONG

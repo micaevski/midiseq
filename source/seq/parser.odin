@@ -25,20 +25,37 @@ import "core:strings"
 // sequencer (and so `adapt_to_source` doesn't need to know about the
 // parser at all).
 Parser :: struct {
-	source:      [dynamic]Source_Event,
-	names:       Names,
-	seed:        u64,
-	src:         string,
-	pos:         int,
-	line:        int,
-	col:         int,
-	scratch:     mem.Arena,
-	scratch_buf: []byte,
-	last_error:  string,
+	source:                 [dynamic]Source_Event,
+	names:                  Names,
+	seed:                   u64,
+	src:                    string,
+	pos:                    int,
+	line:                   int,
+	col:                    int,
+	scratch:                mem.Arena,
+	scratch_buf:            []byte,
+	last_error:             string,
+	macros:                 map[string]Macro_Def,
+	macro_instances:        [dynamic]Source_Index,
+	macro_instances_by_key: map[string]Source_Index,
+	macro_depth:            int,
+}
+
+
+// Macros are parse-time only: a definition captures its parameter
+// names and the raw body text (a slice of `src`). On each invocation
+// we textually substitute `$name` tokens and re-parse the result into
+// a fresh anonymous `Source_Timeline` parented under the caller.
+Macro_Def :: struct {
+	params: []string,
+	body:   string,
 }
 
 
 PARSE_SCRATCH_BYTES :: 4 * 1024 * 1024
+MAX_MACRO_DEPTH :: 32
+MAX_MACRO_PARAMS :: 16
+MAX_MACRO_ARGS :: 16
 
 
 // The implicit global-scope timeline. Reserved as a label name; defining
@@ -105,6 +122,7 @@ parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bo
 // global scope. `time` defaults to 0. Note names (C4, F#3, Ab-1, ...)
 // are reserved and cannot be used as label names.
 parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
+	mem.arena_free_all(&parser.scratch)
 	context.allocator = mem.arena_allocator(&parser.scratch)
 
 	// Wipe any leftovers from a previous parse (or from buffers we
@@ -112,6 +130,10 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 	source_store_reset(&parser.source)
 	names_reset(&parser.names)
 	parser.seed = 0
+	parser.macros = make(map[string]Macro_Def, 16)
+	parser.macro_instances = make([dynamic]Source_Index, 0, 32)
+	parser.macro_instances_by_key = make(map[string]Source_Index, 32)
+	parser.macro_depth = 0
 
 	parser.src = src
 	parser.pos = 0
@@ -153,30 +175,41 @@ parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: b
 }
 
 
-// For each top-level timeline, walk its direct children. Any child that
-// is a Source_Timeline is a reference, and its `first` currently holds
-// the target's event index. Replace it with the target's children chain
-// head.
+// Walk every timeline that owns a children chain (top-level
+// definitions plus anonymous macro instances) and rewrite any
+// children that are *refs*, replacing the target's event index with
+// the target's children chain head. Macro instances themselves are
+// children of their caller but they own a real chain — they're
+// recognised via the `instance_set` lookup so we don't mistake them
+// for refs.
 @(private)
 resolve_references :: proc(p: ^Parser) {
-	for _, top_index in p.names.by_name {
-		top_event := source_get(&p.source, top_index)
-		top_timeline, ok := top_event.kind.(Source_Timeline)
-		if !ok do continue
+	instance_set := make(map[Source_Index]bool, len(p.macro_instances))
+	for idx in p.macro_instances do instance_set[idx] = true
 
-		child_index := top_timeline.first
+	walk :: proc(p: ^Parser, parent_idx: Source_Index, instance_set: map[Source_Index]bool) {
+		parent_event := source_get(&p.source, parent_idx)
+		parent_timeline, ok := parent_event.kind.(Source_Timeline)
+		if !ok do return
+
+		child_index := parent_timeline.first
 		for child_index != NIL_SOURCE {
 			child := source_get(&p.source, child_index)
 			next := child.next
 			if _, is_timeline := child.kind.(Source_Timeline); is_timeline {
-				ref_timeline := &child.kind.(Source_Timeline)
-				target := ref_timeline.first
-				ref_timeline.first =
-					source_get(&p.source, target).kind.(Source_Timeline).first
+				if !instance_set[child_index] {
+					ref_timeline := &child.kind.(Source_Timeline)
+					target := ref_timeline.first
+					ref_timeline.first =
+						source_get(&p.source, target).kind.(Source_Timeline).first
+				}
 			}
 			child_index = next
 		}
 	}
+
+	for _, top_index in p.names.by_name do walk(p, top_index, instance_set)
+	for inst_idx in p.macro_instances do walk(p, inst_idx, instance_set)
 }
 
 
@@ -199,7 +232,8 @@ pass_1 :: proc(p: ^Parser) -> bool {
 		}
 
 		// Header lines have a `:` somewhere on them; everything else
-		// is an event line (or a SEED directive).
+		// is an event line (or a SEED directive). A header may be a
+		// regular timeline (`NAME:`) or a macro definition (`NAME(...):`).
 		if peek_line_has_colon(p) {
 			name, ok := parse_ident(p)
 			if !ok {parse_error(p, "expected identifier"); return false}
@@ -215,6 +249,29 @@ pass_1 :: proc(p: ^Parser) -> bool {
 				parse_error(p, "note name %s cannot be used as a label", name)
 				return false
 			}
+
+			skip_inline_ws(p)
+			if p.pos < len(p.src) && p.src[p.pos] == '(' {
+				// Macro definition: NAME(p1, p2, ...): body
+				p.pos += 1
+				p.col += 1
+				params, p_ok := parse_macro_param_list(p)
+				if !p_ok do return false
+				if !expect(p, ':') do return false
+				if !expect_line_end(p) do return false
+				if p.pos < len(p.src) && p.src[p.pos] == '\n' {
+					p.pos += 1
+					p.line += 1
+					p.col = 1
+				}
+				body := capture_macro_body(p)
+				p.macros[name] = Macro_Def {
+					params = params,
+					body   = body,
+				}
+				continue
+			}
+
 			idx := source_alloc(&p.source)
 			if idx == NIL_SOURCE {
 				parse_error(p, "source storage full")
@@ -309,6 +366,20 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 				)
 				return false
 			}
+			skip_inline_ws(p)
+			if p.pos < len(p.src) && p.src[p.pos] == '(' {
+				// Macro definition — already captured in pass_1. Skip
+				// past `(...):` plus the body so pass_2 doesn't see the
+				// body lines as events.
+				skip_to_line_end(p)
+				if p.pos < len(p.src) && p.src[p.pos] == '\n' {
+					p.pos += 1
+					p.line += 1
+					p.col = 1
+				}
+				_ = capture_macro_body(p)
+				continue
+			}
 			idx := p.names.by_name[name]
 			// Names from p.src are slices into the caller-owned source
 			// string and disappear once parsing is done; clone into the
@@ -356,6 +427,12 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 			return false
 		}
 
+		// Macro invocation: NAME(args).
+		if p.pos < len(p.src) && p.src[p.pos] == '(' {
+			if !parse_macro_invocation(p, name, current_parent) do return false
+			continue
+		}
+
 		// `NAME!` is shorthand for `NAME free=true`.
 		auto_free := false
 		if p.pos < len(p.src) && p.src[p.pos] == '!' {
@@ -368,6 +445,71 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 	}
 	return true
 }
+
+// Parse the body of an anonymous macro instance: same line-shape as
+// pass_2 but without header / SEED / blank-line-resets-parent
+// handling. A blank line or EOF ends the body cleanly.
+@(private)
+pass_2_body :: proc(p: ^Parser, parent: Source_Index) -> bool {
+	for {
+		if skip_ws_track_blank(p) do return true
+		if p.pos >= len(p.src) do return true
+
+		c := p.src[p.pos]
+
+		if c == '"' {
+			path, ok_s := parse_string_literal(p)
+			if !ok_s do return false
+			skip_inline_ws(p)
+			time: f32 = 0
+			if !at_line_end(p) {
+				v, ok := parse_number(p)
+				if !ok {parse_error(p, "expected time after path"); return false}
+				time = v - 1
+			}
+			if !expect_line_end(p) do return false
+			if !load_midi_into(p, path, parent, time) do return false
+			continue
+		}
+
+		if peek_line_has_colon(p) {
+			parse_error(p, "macro body cannot contain a definition")
+			return false
+		}
+
+		if lo, hi, is_note := try_parse_note_range(p); is_note {
+			if !parse_note_event(p, parent, lo, hi) do return false
+			continue
+		}
+		if dlo, olo, dhi, ohi, is_deg := try_parse_degree_range(p); is_deg {
+			if !parse_degree_note_event(p, parent, dlo, olo, dhi, ohi) do return false
+			continue
+		}
+
+		if !is_ident_start(c) {
+			parse_error(p, "unexpected character %c", rune(c))
+			return false
+		}
+
+		name, ok := parse_ident(p)
+		if !ok {parse_error(p, "expected identifier"); return false}
+
+		if p.pos < len(p.src) && p.src[p.pos] == '(' {
+			if !parse_macro_invocation(p, name, parent) do return false
+			continue
+		}
+
+		auto_free := false
+		if p.pos < len(p.src) && p.src[p.pos] == '!' {
+			p.pos += 1
+			p.col += 1
+			auto_free = true
+		}
+
+		if !parse_ref_event(p, name, parent, auto_free) do return false
+	}
+}
+
 
 @(private)
 expect_line_end :: proc(p: ^Parser) -> bool {
@@ -430,9 +572,22 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 		parse_error(p, "undefined reference: %s", name)
 		return false
 	}
+	return parse_ref_event_with_target(p, target, name, parent, auto_free)
+}
 
-	target_timeline := source_get(&p.source, target).kind.(Source_Timeline)
 
+// Same as parse_ref_event but with an already-resolved target index.
+// Used by macro invocations, which target an anonymous timeline that
+// isn't in `names.by_name`. `display_name` is what the debug view
+// shows next to the resulting ref.
+@(private)
+parse_ref_event_with_target :: proc(
+	p: ^Parser,
+	target: Source_Index,
+	display_name: string,
+	parent: Source_Index,
+	auto_free: bool,
+) -> bool {
 	skip_inline_ws(p)
 	beat: f32 = 0
 	if !at_line_end(p) && !is_kwarg_start(p) {
@@ -529,11 +684,287 @@ parse_ref_event :: proc(p: ^Parser, name: string, parent: Source_Index, auto_fre
 		// Refs don't have a name of their own; record the target's
 		// name so the debug view can label it.
 		p.names.lookup[ref_idx], _ = strings.clone(
-			name,
+			display_name,
 			mem.arena_allocator(&p.names.arena),
 		)
 	}
 	return true
+}
+
+
+// Parse the contents of a macro parameter list, with `(` already
+// consumed. Stops after consuming `)`. Param names are bare
+// identifiers separated by commas (or whitespace, since `,` is
+// already treated as whitespace by the lexer).
+@(private)
+parse_macro_param_list :: proc(p: ^Parser) -> (params: []string, ok: bool) {
+	buf: [MAX_MACRO_PARAMS]string
+	count := 0
+	for {
+		skip_inline_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unterminated macro parameter list")
+			return nil, false
+		}
+		if p.src[p.pos] == ')' {
+			p.pos += 1
+			p.col += 1
+			break
+		}
+		name, n_ok := parse_ident(p)
+		if !n_ok {
+			parse_error(p, "expected macro parameter name")
+			return nil, false
+		}
+		if count >= MAX_MACRO_PARAMS {
+			parse_error(p, "too many macro parameters (max %d)", MAX_MACRO_PARAMS)
+			return nil, false
+		}
+		buf[count] = name
+		count += 1
+	}
+	out := make([]string, count)
+	copy(out, buf[:count])
+	return out, true
+}
+
+
+// Walk forward from current position to the end of the macro body
+// (the next blank line or EOF or root-scope header). Returns a slice
+// of `p.src` and leaves p.pos at the start of whatever comes after.
+@(private)
+capture_macro_body :: proc(p: ^Parser) -> string {
+	body_start := p.pos
+	body_end := body_start
+	for {
+		line_start := p.pos
+		// Detect blank line: only horizontal whitespace and/or a
+		// comment, then newline (or EOF).
+		j := p.pos
+		for j < len(p.src) && (p.src[j] == ' ' || p.src[j] == '\t' || p.src[j] == '\r' || p.src[j] == ',') {
+			j += 1
+		}
+		if j < len(p.src) && p.src[j] == '#' {
+			for j < len(p.src) && p.src[j] != '\n' do j += 1
+		}
+		blank := j >= len(p.src) || p.src[j] == '\n'
+		if blank {
+			p.pos = line_start
+			break
+		}
+		// Otherwise this line is part of the body. Body extends through
+		// the trailing newline so the recursive parser sees a clean line
+		// boundary.
+		skip_to_line_end(p)
+		if p.pos < len(p.src) && p.src[p.pos] == '\n' {
+			p.pos += 1
+			p.line += 1
+			p.col = 1
+		}
+		body_end = p.pos
+	}
+	return p.src[body_start:body_end]
+}
+
+
+// Parse the argument list for a macro invocation, with `(` already
+// consumed. Each arg is captured as a raw text slice (a number literal
+// or an identifier) — substitution into the macro body is purely
+// textual.
+@(private)
+parse_macro_arg_list :: proc(p: ^Parser) -> (args: []string, ok: bool) {
+	buf: [MAX_MACRO_ARGS]string
+	count := 0
+	for {
+		skip_inline_ws(p)
+		if p.pos >= len(p.src) {
+			parse_error(p, "unterminated macro argument list")
+			return nil, false
+		}
+		if p.src[p.pos] == ')' {
+			p.pos += 1
+			p.col += 1
+			break
+		}
+		if count >= MAX_MACRO_ARGS {
+			parse_error(p, "too many macro arguments (max %d)", MAX_MACRO_ARGS)
+			return nil, false
+		}
+		// An argument is a contiguous run of non-whitespace, non-comma,
+		// non-paren chars, so things like `3d` or `BASS` stay a single
+		// token even though they'd lex as two pieces in normal grammar.
+		// The text is substituted into the body verbatim.
+		arg_start := p.pos
+		for p.pos < len(p.src) {
+			ac := p.src[p.pos]
+			if is_macro_arg_terminator(ac) do break
+			p.pos += 1
+			p.col += 1
+		}
+		if p.pos == arg_start {
+			parse_error(p, "empty macro argument")
+			return nil, false
+		}
+		buf[count] = p.src[arg_start:p.pos]
+		count += 1
+	}
+	out := make([]string, count)
+	copy(out, buf[:count])
+	return out, true
+}
+
+
+// Substitute `$name` tokens in `body` using the macro's params/args.
+// Result is allocated in the parser scratch arena. Unknown `$name`
+// is left intact (will produce a downstream parse error).
+@(private)
+substitute_macro_params :: proc(
+	p: ^Parser,
+	def: Macro_Def,
+	args: []string,
+) -> string {
+	sb := strings.builder_make()
+	body := def.body
+	i := 0
+	for i < len(body) {
+		if body[i] == '$' && i + 1 < len(body) && is_ident_start(body[i + 1]) {
+			j := i + 1
+			for j < len(body) {
+				ch := body[j]
+				if !(is_alpha(ch) || is_digit(ch) || ch == '_') do break
+				j += 1
+			}
+			pname := body[i + 1:j]
+			arg_idx := -1
+			for k in 0 ..< len(def.params) {
+				if def.params[k] == pname {
+					arg_idx = k
+					break
+				}
+			}
+			if arg_idx >= 0 {
+				strings.write_string(&sb, args[arg_idx])
+			} else {
+				// Unknown placeholder — leave as-is so the recursive
+				// parse surfaces a meaningful error at the right line.
+				strings.write_byte(&sb, '$')
+				strings.write_string(&sb, pname)
+			}
+			i = j
+		} else {
+			strings.write_byte(&sb, body[i])
+			i += 1
+		}
+	}
+	return strings.to_string(sb)
+}
+
+
+// Handle a macro invocation: NAME(...) on an event line. The name
+// has already been consumed; we're sitting at `(`. Builds an
+// anonymous `Source_Timeline` parented to `parent`, parses the
+// substituted body into it, then reads any trailing beat / kwargs
+// and treats the invocation like a ref to the anonymous timeline.
+@(private)
+parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -> bool {
+	def, found := p.macros[name]
+	if !found {
+		parse_error(p, "undefined macro: %s", name)
+		return false
+	}
+	if p.macro_depth >= MAX_MACRO_DEPTH {
+		parse_error(p, "macro expansion too deep (max %d) — recursive macro?", MAX_MACRO_DEPTH)
+		return false
+	}
+
+	if !expect(p, '(') do return false
+	args, a_ok := parse_macro_arg_list(p)
+	if !a_ok do return false
+	if len(args) != len(def.params) {
+		parse_error(
+			p,
+			"macro %s expects %d argument(s), got %d",
+			name,
+			len(def.params),
+			len(args),
+		)
+		return false
+	}
+
+	// Optional `!` after the invocation: `MACRO(...)!` is shorthand
+	// for `MACRO(...) free=true`, same as on a regular ref.
+	auto_free := false
+	if p.pos < len(p.src) && p.src[p.pos] == '!' {
+		p.pos += 1
+		p.col += 1
+		auto_free = true
+	}
+
+	// Memoize by (name, args). Each unique parameter combination is
+	// equivalent to a distinct anonymous definition; further calls
+	// with the same args (including a macro calling itself) emit a
+	// ref to the already-built instance instead of recursing. The
+	// instance is registered in the memo *before* its body is parsed
+	// so a self-reference inside the body finds it.
+	key := build_macro_key(name, args)
+	if existing, found := p.macro_instances_by_key[key]; found {
+		return parse_ref_event_with_target(p, existing, name, parent, auto_free)
+	}
+
+	inst_idx := source_alloc(&p.source)
+	if inst_idx == NIL_SOURCE {
+		parse_error(p, "source storage full")
+		return false
+	}
+	inst := source_get(&p.source, inst_idx)
+	inst.chance = 100
+	inst.kind = Source_Timeline{rate = 1, channel = -1}
+	append(&p.macro_instances, inst_idx)
+	p.macro_instances_by_key[key] = inst_idx
+
+	body := substitute_macro_params(p, def, args)
+
+	// Parse the substituted body into the anonymous timeline.
+	saved_src := p.src
+	saved_pos := p.pos
+	saved_line := p.line
+	saved_col := p.col
+	p.src = body
+	p.pos = 0
+	p.line = 1
+	p.col = 1
+	p.macro_depth += 1
+	body_ok := pass_2_body(p, inst_idx)
+	p.macro_depth -= 1
+	p.src = saved_src
+	p.pos = saved_pos
+	p.line = saved_line
+	p.col = saved_col
+	if !body_ok do return false
+
+	// Now treat the invocation as a ref to the anon timeline. Read the
+	// trailing beat and any kwargs (rate=, trans=, ...).
+	return parse_ref_event_with_target(p, inst_idx, name, parent, auto_free)
+}
+
+
+@(private = "file")
+is_macro_arg_terminator :: proc(c: u8) -> bool {
+	return c == ',' || c == ')' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '#'
+}
+
+
+@(private = "file")
+build_macro_key :: proc(name: string, args: []string) -> string {
+	sb := strings.builder_make()
+	strings.write_string(&sb, name)
+	strings.write_byte(&sb, '(')
+	for arg, i in args {
+		if i > 0 do strings.write_byte(&sb, ',')
+		strings.write_string(&sb, arg)
+	}
+	strings.write_byte(&sb, ')')
+	return strings.to_string(sb)
 }
 
 
