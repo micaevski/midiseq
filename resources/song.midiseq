@@ -1,12 +1,12 @@
 KICK:
-P1O3 0
+P1O3 1
 
 ON_EACH(t,d):
 $t! 1 
 ON_EACH($t,$d)! 2 trans=$d 
 
 SONG:
-ON_EACH(KICK,3d) chan=2 scale=CPm
+ON_EACH(KICK,3d) chan=2 scale=CPm 
 SONG! 5
 
-SONG
+SONG    

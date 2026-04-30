@@ -1,7 +1,41 @@
 package tests
 
 import "../source/seq"
+import "core:os"
 import "core:testing"
+
+
+// Regression test for a bug where `parse_file` loaded the file bytes
+// into the scratch arena and `parse_source` then reset the same arena
+// mid-parse — corrupting the source bytes. Hits the recursive-macro
+// path (which substitutes/allocates in scratch) so the corruption is
+// reliable.
+@(test)
+test_parse_file_recursive_macro :: proc(t: ^testing.T) {
+	src := `KICK:
+P1O3 1
+
+ON_EACH(t,d):
+$t! 1
+ON_EACH($t,$d)! 2 trans=$d
+
+SONG:
+ON_EACH(KICK,3d) chan=2 scale=CPm
+SONG! 5
+
+SONG
+`
+	path := "build/parse_file_test.midiseq"
+	werr := os.write_entire_file(path, transmute([]u8)src)
+	testing.expect_value(t, werr, os.Error{})
+	defer os.remove(path)
+
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+
+	_, ok := seq.parse_file(&parser, path)
+	testing.expect(t, ok, "parse_file should not corrupt source bytes mid-parse")
+}
 
 
 @(test)
@@ -14,7 +48,7 @@ P1O$oct $beat
 P3O$oct $beat
 
 SONG:
-ARP(0, 3)
+ARP(1, 3)
 
 SONG
 `
@@ -30,12 +64,12 @@ test_macro_timeline_param :: proc(t: ^testing.T) {
 	defer seq.destroy_parser(&parser)
 
 	src := `KICK:
-C3 0
+C3 1
 
 ON_EACH(t):
-$t! 0
 $t! 1
 $t! 2
+$t! 3
 
 SONG:
 ON_EACH(KICK)
@@ -89,7 +123,7 @@ test_macro_self_recursive :: proc(t: ^testing.T) {
 	// memoization — same as `BASS!` inside `BASS:` — so this should
 	// parse cleanly without hitting the depth limit.
 	src := `R():
-C3 0
+C3 1
 R()
 
 SONG:
@@ -110,7 +144,7 @@ test_macro_recursive_with_params :: proc(t: ^testing.T) {
 	// Two distinct argument tuples → two instances, each containing
 	// its own substituted self-reference resolved via memoization.
 	src := `M(p):
-P1O$p 0
+P1O$p 1
 M($p)!
 
 SONG:
@@ -135,7 +169,7 @@ test_macro_arg_with_unit_suffix :: proc(t: ^testing.T) {
 	// `trans=2d` syntax for scale-degrees) should pass through as a
 	// single argument rather than being split into `3` and `d`.
 	src := `KICK:
-P1O3 0
+P1O3 1
 
 ON_EACH(t, d):
 $t! 1
@@ -161,7 +195,7 @@ test_macro_invocation_with_modifiers :: proc(t: ^testing.T) {
 	// (`trans=1d`). Regression test for the missing `!` consumption
 	// after the closing paren.
 	src := `KICK:
-C3 0
+C3 1
 
 ON_EACH(t):
 $t! 1
@@ -186,7 +220,7 @@ test_macro_memoizes_same_args :: proc(t: ^testing.T) {
 	// Two invocations with the same args should share an instance —
 	// only one anonymous Source_Timeline is allocated.
 	src := `M(x):
-P1O$x 0
+P1O$x 1
 
 SONG:
 M(3)

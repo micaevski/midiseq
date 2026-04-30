@@ -214,7 +214,7 @@ draw_gui :: proc(
 	// Dashboard occupies the top DASHBOARD_H px and stays fixed; the
 	// viz area below stretches with the window.
 	DASHBOARD_H :: f32(180)
-	FOOTER_H :: f32(28)
+	FOOTER_H :: f32(46)
 	BEAT_W :: f32(180)
 	screen_w := f32(rl.GetScreenWidth())
 	screen_h := f32(rl.GetScreenHeight())
@@ -259,17 +259,25 @@ draw_gui :: proc(
 
 	footer_area := rl.Rectangle{0, screen_h - FOOTER_H, screen_w, FOOTER_H}
 	rl.DrawRectangleRec(footer_area, rl.Color{15, 15, 22, 255})
-	err_msg: cstring
+	// Parse and runtime errors live on separate lines so neither
+	// shadows the other (the runtime pool can fill while you're still
+	// fixing a parse error, etc.).
+	parse_msg, runtime_msg: cstring
+	if len(parser.last_error) > 0 {
+		parse_msg = fmt.ctprintf("%s", parser.last_error)
+	}
 	runtime_err := seq.sequencer_runtime_error(sequencer)
 	if runtime_err.pool_exhausted {
-		err_msg = "sequencer: runtime pool exhausted; dropping events"
+		runtime_msg = "sequencer: runtime pool exhausted; dropping events"
 	} else if runtime_err.empty {
-		err_msg = "sequencer: nothing loaded"
-	} else if len(parser.last_error) > 0 {
-		err_msg = fmt.ctprintf("%s", parser.last_error)
+		runtime_msg = "sequencer: nothing loaded"
 	}
-	if err_msg != nil {
-		ui_draw_text(err_msg, 12, i32(footer_area.y) + 7, 14, rl.Color{255, 110, 110, 255})
+	err_color := rl.Color{255, 110, 110, 255}
+	if parse_msg != nil {
+		ui_draw_text(parse_msg, 12, i32(footer_area.y) + 6, 14, err_color)
+	}
+	if runtime_msg != nil {
+		ui_draw_text(runtime_msg, 12, i32(footer_area.y) + 24, 14, err_color)
 	}
 	ui_draw_text(
 		"[TAB] toggle debug",

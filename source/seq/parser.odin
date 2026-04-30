@@ -85,6 +85,10 @@ destroy_parser :: proc(p: ^Parser) {
 
 parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bool) {
 	parser.last_error = ""
+	// Reset scratch and load the file into it. The bytes will live for
+	// the rest of the parse (parse_source_internal won't reset). Doing
+	// the reset ourselves means parse_source_internal can be called with
+	// `src` already in scratch without invalidating it.
 	mem.arena_free_all(&parser.scratch)
 	context.allocator = mem.arena_allocator(&parser.scratch)
 
@@ -95,13 +99,17 @@ parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bo
 		return NIL_SOURCE, false
 	}
 
-	return parse_source(parser, string(bytes))
+	return parse_source_internal(parser, string(bytes))
 }
 
 
 // Parse `src` into the parser's own buffers. On success, the caller
 // swaps `parser.source`/`parser.names` into the live sequencer and
 // uses the returned root index.
+//
+// `src` is owned by the caller; it must outlive this call. Internal
+// allocations (names, macro bookkeeping, source events) live in the
+// parser's scratch arena, which is reset on entry.
 //
 // Grammar (line-oriented; one event per line):
 //
@@ -124,7 +132,15 @@ parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bo
 parse_source :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
 	mem.arena_free_all(&parser.scratch)
 	context.allocator = mem.arena_allocator(&parser.scratch)
+	return parse_source_internal(parser, src)
+}
 
+
+// Inner parser entry. Assumes scratch has already been reset and that
+// `context.allocator` points at the scratch arena. `src` must outlive
+// this call (it isn't copied).
+@(private)
+parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Index, ok: bool) {
 	// Wipe any leftovers from a previous parse (or from buffers we
 	// just received via swap on a previous successful reparse).
 	source_store_reset(&parser.source)
@@ -347,6 +363,7 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 			if !at_line_end(p) {
 				v, ok := parse_number(p)
 				if !ok {parse_error(p, "expected time after path"); return false}
+				if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
 				time = v - 1
 			}
 			if !expect_line_end(p) do return false
@@ -465,6 +482,7 @@ pass_2_body :: proc(p: ^Parser, parent: Source_Index) -> bool {
 			if !at_line_end(p) {
 				v, ok := parse_number(p)
 				if !ok {parse_error(p, "expected time after path"); return false}
+				if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
 				time = v - 1
 			}
 			if !expect_line_end(p) do return false
@@ -593,6 +611,7 @@ parse_ref_event_with_target :: proc(
 	if !at_line_end(p) && !is_kwarg_start(p) {
 		v, ok := parse_number(p)
 		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
 		beat = v - 1
 	}
 
@@ -982,6 +1001,7 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, lo, hi: i32) -> bool 
 	if !at_line_end(p) && !is_kwarg_start(p) {
 		v, ok := parse_number(p)
 		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
 		beat = v - 1
 	}
 
@@ -1043,6 +1063,7 @@ parse_degree_note_event :: proc(
 	if !at_line_end(p) && !is_kwarg_start(p) {
 		v, ok := parse_number(p)
 		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
 		beat = v - 1
 	}
 
