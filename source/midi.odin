@@ -36,11 +36,17 @@ Midi_Devices :: struct {
 // note-off is needed; this layer just emits messages, gated by a
 // per-key musical-time throttle to keep MIDI volume under what the
 // synth can drain.
+@(private = "file")
+IN_BUF_LEN :: 128
+
 Midi_IO :: struct {
 	in_stream:       pm.Stream,
 	out_stream:      pm.Stream,
 	in_name:         [MIDI_NAME_LEN]u8,
 	out_name:        [MIDI_NAME_LEN]u8,
+	in_buf:          [IN_BUF_LEN]pm.Event,
+	in_buf_count:    int,
+	in_buf_pos:      int,
 	last_emit_beat:  [16][128]f32,
 	playing:         [16][128]bool,
 	events_in_frame: u32,
@@ -166,6 +172,46 @@ midi_close_input :: proc(midi: ^Midi_IO) {
 		midi.in_stream = nil
 	}
 	midi.in_name = {}
+	midi.in_buf_count = 0
+	midi.in_buf_pos = 0
+}
+
+
+// Drain the next clock-relevant message from the input stream. Returns
+// (event, data, true) for one message at a time; the caller loops until
+// ok==false. Refills its internal buffer via Pm_Read on demand. Non-
+// clock messages are dropped silently. SPP returns the 14-bit position
+// (in 16th-notes) as `data`.
+midi_read :: proc(midi: ^Midi_IO) -> (event: seq.Clock_Event, data: i32, ok: bool) {
+	if midi.in_stream == nil do return .None, 0, false
+
+	for {
+		for midi.in_buf_pos < midi.in_buf_count {
+			evt := midi.in_buf[midi.in_buf_pos]
+			midi.in_buf_pos += 1
+			msg := u32(evt.message)
+			status := u8(msg & 0xFF)
+			switch status {
+			case 0xF8:
+				return .Tick, 0, true
+			case 0xFA:
+				return .Start, 0, true
+			case 0xFB:
+				return .Continue, 0, true
+			case 0xFC:
+				return .Stop, 0, true
+			case 0xF2:
+				lsb := i32((msg >> 8) & 0x7F)
+				msb := i32((msg >> 16) & 0x7F)
+				return .Song_Position, (msb << 7) | lsb, true
+			}
+		}
+
+		n := pm.Read(midi.in_stream, raw_data(midi.in_buf[:]), i32(len(midi.in_buf)))
+		if n <= 0 do return .None, 0, false
+		midi.in_buf_count = int(n)
+		midi.in_buf_pos = 0
+	}
 }
 
 midi_close_output :: proc(midi: ^Midi_IO) {

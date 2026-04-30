@@ -169,10 +169,21 @@ main :: proc() {
 	midi_open_input_by_index(&midi, &devices, int(in_active))
 	midi_open_output_by_index(&midi, &devices, int(out_active))
 
+	// External clock requires a working input. If the saved input
+	// device wasn't found, drop external mode and persist so a stale
+	// `external_clock = true` doesn't get carried forward.
+	if in_active == 0 && config.external_clock {
+		config.external_clock = false
+		config_save(&config, CONFIG_PATH)
+	}
+
 	sequencer := seq.make_sequencer()
 	defer seq.destroy_sequencer(&sequencer)
 	sequencer.sink = midi_sink(&midi)
-	sequencer.tempo = config.tempo
+
+	clock: seq.Clock
+	clock.tempo = config.tempo
+	if config.external_clock do clock.mode = .External
 
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
@@ -232,8 +243,30 @@ main :: proc() {
 			reload_song(&sequencer, &parser, SONG_PATH)
 		}
 
-		if playing && !seq.finished(&sequencer) {
-			seq.tick(&sequencer, dt)
+		// Drain any incoming MIDI messages. The clock owns all timing
+		// state and updates itself; we handle the side-effects on the
+		// sequencer (start/silence) here, since those would create a
+		// package cycle if pushed into seq/clock.odin.
+		now := rl.GetTime()
+		for {
+			event, data, ok := midi_read(&midi)
+			if !ok do break
+			if clock.mode == .External {
+				switch event {
+				case .Start:
+					seq.start(&sequencer)
+					midi_reset(&midi)
+				case .Stop:
+					seq.silence(&sequencer)
+				case .None, .Tick, .Continue, .Song_Position:
+				}
+			}
+			seq.clock_event(&clock, event, data, now)
+		}
+		seq.clock_tick(&clock, dt, playing)
+
+		if playing && seq.clock_is_running(&clock) && !seq.finished(&sequencer) {
+			seq.tick(&sequencer, clock.beat)
 		}
 		midi_end_frame(&midi, dt)
 
@@ -271,17 +304,24 @@ main :: proc() {
 			playing = false
 		}
 
-		tempo_label := fmt.ctprintf("%.0f BPM", sequencer.tempo)
-		rl.GuiSlider(
-			rl.Rectangle{120, 120, 280, 20},
-			"Tempo",
-			tempo_label,
-			&sequencer.tempo,
-			40,
-			240,
-		)
-		if rl.IsMouseButtonReleased(.LEFT) && sequencer.tempo != config.tempo {
-			config.tempo = sequencer.tempo
+		external := clock.mode == .External
+		rl.GuiCheckBox(rl.Rectangle{400, 70, 20, 20}, "External Clock", &external)
+		new_mode: seq.Clock_Mode = .External if external else .Internal
+		if new_mode != clock.mode {
+			clock.mode = new_mode
+			config.external_clock = external
+			config_save(&config, CONFIG_PATH)
+		}
+		if external {
+			status: cstring = clock.running ? "running" : "stopped"
+			label := fmt.ctprintf("ext: %.1f BPM (%s)", clock.bpm_ema, status)
+			ui_draw_text(label, 540, 74, 14, rl.Color{180, 180, 200, 255})
+		}
+
+		tempo_label := fmt.ctprintf("%.0f BPM", clock.tempo)
+		rl.GuiSlider(rl.Rectangle{120, 120, 280, 20}, "Tempo", tempo_label, &clock.tempo, 40, 240)
+		if rl.IsMouseButtonReleased(.LEFT) && clock.tempo != config.tempo {
+			config.tempo = clock.tempo
 			config_save(&config, CONFIG_PATH)
 		}
 

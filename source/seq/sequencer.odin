@@ -147,7 +147,6 @@ Tick_Errors :: struct {
 }
 
 Sequencer :: struct {
-	tempo:         f32,
 	beat:          f32,
 	source_root:   Source_Index,
 	active_head:   Runtime_Index,
@@ -319,9 +318,9 @@ start :: proc(sequencer: ^Sequencer) {
 }
 
 
-tick :: proc(sequencer: ^Sequencer, dt: f32) {
+tick :: proc(sequencer: ^Sequencer, beat: f32) {
 	sequencer.tick_errors = {}
-	sequencer.beat += dt * sequencer.tempo / 60.0
+	sequencer.beat = beat
 
 	previous_index := NIL_RUNTIME
 	current_index := sequencer.active_head

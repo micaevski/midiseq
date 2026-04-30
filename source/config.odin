@@ -10,9 +10,10 @@ CONFIG_PATH :: "midiseq.config"
 DEFAULT_TEMPO :: f32(120)
 
 Config :: struct {
-	midi_in:  [MIDI_NAME_LEN]u8,
-	midi_out: [MIDI_NAME_LEN]u8,
-	tempo:    f32,
+	midi_in:        [MIDI_NAME_LEN]u8,
+	midi_out:       [MIDI_NAME_LEN]u8,
+	tempo:          f32,
+	external_clock: bool,
 }
 
 
@@ -65,6 +66,8 @@ config_load :: proc(c: ^Config, path: string) -> bool {
 			config_set_out(c, value)
 		case "tempo":
 			if v, ok := strconv.parse_f32(value); ok do c.tempo = v
+		case "external_clock":
+			c.external_clock = value == "true" || value == "1"
 		}
 	}
 	return true
@@ -73,13 +76,15 @@ config_load :: proc(c: ^Config, path: string) -> bool {
 // Serialize the Config to disk. Builds the text into a stack buffer
 // to avoid any heap allocation.
 config_save :: proc(c: ^Config, path: string) -> bool {
-	buf: [MIDI_NAME_LEN * 4 + 64]u8
+	buf: [MIDI_NAME_LEN * 4 + 128]u8
+	ext: cstring = c.external_clock ? "true" : "false"
 	text := fmt.bprintf(
 		buf[:],
-		"midi_in = %s\nmidi_out = %s\ntempo = %.2f\n",
+		"midi_in = %s\nmidi_out = %s\ntempo = %.2f\nexternal_clock = %s\n",
 		config_in(c),
 		config_out(c),
 		c.tempo,
+		ext,
 	)
 	return os.write_entire_file(path, transmute([]u8)text) == nil
 }
