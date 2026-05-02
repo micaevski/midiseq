@@ -27,6 +27,15 @@
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"preLaunchTask": "MidiSeq Debug Optimized"
+		},
+		{
+			"name": "MidiSeq Tests Debug",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/build/midiseq-tests",
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "MidiSeq Tests Debug"
 		}
 	]
 }

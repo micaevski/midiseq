@@ -27,6 +27,31 @@
 			"args": ["build", "source", "-o:speed", "-debug", "-out:build/midiseq-relwithdebinfo"],
 			"group": "build",
 			"problemMatcher": []
+		},
+		{
+			"label": "MidiSeq Tests",
+			"type": "shell",
+			"command": "odin",
+			"args": ["test", "tests"],
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "MidiSeq Tests Debug",
+			"type": "shell",
+			"command": "odin",
+			"args": [
+				"test",
+				"tests",
+				"-debug",
+				"-keep-executable",
+				"-out:build/midiseq-tests"
+			],
+			"group": "test",
+			"problemMatcher": []
 		}
 	]
 }
