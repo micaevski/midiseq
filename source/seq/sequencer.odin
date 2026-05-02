@@ -108,6 +108,7 @@ start :: proc(sequencer: Sequencer_Handle) {
 		channel       = 0,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
+		velocity      = source_timeline.velocity,
 		scale         = source_timeline.scale,
 	}
 	root_event.active_next = NIL_RUNTIME
@@ -329,6 +330,7 @@ Source_Timeline :: struct {
 	first:         Source_Index,
 	transposition: Transposition,
 	rate:          f32, // time-scale multiplier
+	velocity:      i32, // additive offset applied to child notes
 	scale:         Scale, // zero-value (None) means "no scale set"
 	channel:       Maybe(u8),
 	free:          bool, // ref: spawn detaches from parent's lifecycle
@@ -367,6 +369,7 @@ Runtime_Timeline :: struct {
 	source_idx:    Source_Index,
 	transposition: Transposition,
 	rate:          f32,
+	velocity:      i32,
 	scale:         Scale,
 	channel:       u8,
 }
@@ -703,7 +706,7 @@ play_timeline :: proc(
 			}
 			sequencer.playing_notes[channel][number] = new_idx
 			sequencer.last_emit_beat[channel][number] = beat
-			sequencer.sink.note_on(&sequencer.sink, channel, number, k.velocity, beat)
+			sequencer.sink.note_on(&sequencer.sink, channel, number, clamp(k.velocity + timeline.velocity, 0, 127), beat)
 
 		case Source_Timeline:
 			new_idx = runtime_alloc(&sequencer.runtime_pool)
@@ -723,10 +726,11 @@ play_timeline :: proc(
 				source_idx = timeline.cursor,
 				channel = k.channel.? or_else timeline.channel,
 				transposition = Transposition {
-					semitones = k.transposition.semitones + timeline.transposition.semitones,
-					degrees = k.transposition.degrees + timeline.transposition.degrees,
+					semitones = i16(clamp(i32(k.transposition.semitones) + i32(timeline.transposition.semitones), -127, 127)),
+					degrees = i16(clamp(i32(k.transposition.degrees) + i32(timeline.transposition.degrees), -127, 127)),
 				},
-				rate = k.rate * timeline.rate,
+				rate = clamp(k.rate * timeline.rate, 1.0 / 1024.0, 1024.0),
+				velocity = clamp(k.velocity + timeline.velocity, -127, 127),
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
 			}
 		}

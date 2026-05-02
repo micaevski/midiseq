@@ -707,6 +707,7 @@ parse_ref_event_with_target :: proc(
 
 	trans: Transposition
 	rate: f32 = 1
+	vel: i32 = 0
 	chance: i32 = 100
 	chan: Maybe(u8)
 	free: bool = auto_free
@@ -741,7 +742,13 @@ parse_ref_event_with_target :: proc(
 			if !has_value {parse_error(p, "rate requires '=value'"); return false}
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected rate"); return false}
+			if v <= 0 {parse_error(p, "rate must be positive, got %.3g", v); return false}
 			rate = v
+		case "vel":
+			if !has_value {parse_error(p, "vel requires '=value'"); return false}
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected velocity"); return false}
+			vel = i32(v)
 		case "chance":
 			if !has_value {parse_error(p, "chance requires '=value'"); return false}
 			c, ok := parse_number(p)
@@ -784,6 +791,7 @@ parse_ref_event_with_target :: proc(
 				channel = chan,
 				transposition = trans,
 				rate = rate,
+				velocity = vel,
 				free = free,
 				scale = scale,
 			},

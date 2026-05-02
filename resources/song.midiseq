@@ -1,8 +1,7 @@
 MAJOR_CHORD:
 P1O3 1
 P3O3 1
-P5O3 1
-P7O3 1
+
 
 UP(t,d,max):
 $t 
@@ -14,9 +13,9 @@ else
 DOWN(t,d,max):
 $t 
 if trans > -$max
-    DOWN($t,$d,$max)! 2 trans=-$d
+    DOWN($t,$d,$max)! 2 trans=-$d vel=-4
 else
-    UP($t,$d,$max)! 2 trans=$d 
+    UP($t,$d,$max)! 2 trans=$d vel=20
 
 KICK:
 C2 1 
@@ -28,8 +27,8 @@ SONG:
 KICK chan=3
 KICK 1.5 chan=3 trans=2 rate=2 
 KICK 2 chan=3 trans=6  
-UP(MAJOR_CHORD, 1d, 7d) scale=Dm chan=1 rate=2 trans=12
-UP(MAJOR_CHORD, 1d, 7d) scale=Dm chan=2 rate=1 
-SONG! 17
+#UP(MAJOR_CHORD, 1d, 12d) scale=DPM chan=1 rate=2 trans=12
+UP(MAJOR_CHORD, 1d, 12d) scale=DP M chan=2 rate=2
+SONG! 33
 
 SONG
