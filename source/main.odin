@@ -1,5 +1,6 @@
 package main
 
+import "core:c/libc"
 import "core:fmt"
 import "core:mem"
 import "seq"
@@ -8,6 +9,19 @@ import rl "vendor:raylib"
 
 SONG_PATH :: "resources/song.midiseq"
 TEMP_ARENA_BYTES :: 1 * 1024 * 1024
+
+
+open_in_editor :: proc(path: string) {
+	cmd: cstring
+	when ODIN_OS == .Darwin {
+		cmd = fmt.ctprintf("open '%s'", path)
+	} else when ODIN_OS == .Linux {
+		cmd = fmt.ctprintf("xdg-open '%s' &", path)
+	} else when ODIN_OS == .Windows {
+		cmd = fmt.ctprintf("start \"\" \"%s\"", path)
+	}
+	libc.system(cmd)
+}
 
 
 draw_pool_counter :: proc(label: cstring, used, total: i64, color: rl.Color, area: rl.Rectangle) {
@@ -209,10 +223,11 @@ draw_gui :: proc(
 	}
 	if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") do transport_pause(sequencer, clock)
 	if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") do transport_stop(sequencer, clock)
+	if rl.GuiButton(rl.Rectangle{380, 60, 100, 40}, "Edit") do open_in_editor(SONG_PATH)
 
 	clock_status := seq.clock_status(clock)
 	external := clock_status.mode == .External
-	rl.GuiCheckBox(rl.Rectangle{400, 70, 20, 20}, "External Clock", &external)
+	rl.GuiCheckBox(rl.Rectangle{500, 70, 20, 20}, "External Clock", &external)
 	new_mode: seq.Clock_Mode = .External if external else .Internal
 	if new_mode != clock_status.mode {
 		seq.clock_set_mode(clock, new_mode)
@@ -222,7 +237,7 @@ draw_gui :: proc(
 	if external {
 		status: cstring = clock_status.external_running ? "running" : "stopped"
 		label := fmt.ctprintf("ext: %.1f BPM (%s)", clock_status.bpm_ema, status)
-		ui_draw_text(label, 540, 74, 14, rl.Color{180, 180, 200, 255})
+		ui_draw_text(label, 640, 74, 14, rl.Color{180, 180, 200, 255})
 	}
 
 	tempo := clock_status.tempo
