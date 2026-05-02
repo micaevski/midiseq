@@ -172,7 +172,9 @@ parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Ind
 	}
 	root_event := source_get(&parser.source, root)
 	root_event.chance = 100
-	root_event.kind = Source_Timeline{rate = 1}
+	root_event.kind = Source_Timeline {
+		rate = 1,
+	}
 	root_name, _ := strings.clone(ROOT_NAME, mem.arena_allocator(&parser.names.arena))
 	parser.names.lookup[root] = root_name
 	parser.names.by_name[root_name] = root
@@ -245,8 +247,7 @@ resolve_references :: proc(p: ^Parser) {
 				if !instance_set[walker] {
 					ref_timeline := &child.kind.(Source_Timeline)
 					target := ref_timeline.first
-					ref_timeline.first =
-						source_get(&p.source, target).kind.(Source_Timeline).first
+					ref_timeline.first = source_get(&p.source, target).kind.(Source_Timeline).first
 				}
 			} else if fork, is_fork := child.kind.(Source_Fork); is_fork {
 				walk_chain(p, fork.else_first, instance_set, visited)
@@ -330,7 +331,9 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			}
 			top_event := source_get(&p.source, idx)
 			top_event.chance = 100
-			top_event.kind = Source_Timeline{rate = 1}
+			top_event.kind = Source_Timeline {
+				rate = 1,
+			}
 			p.names.by_name[name] = idx
 			if !expect(p, ':') do return false
 			continue
@@ -437,10 +440,7 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 			// string and disappear once parsing is done; clone into the
 			// parser's names arena so they survive the swap into the
 			// sequencer.
-			p.names.lookup[idx], _ = strings.clone(
-				name,
-				mem.arena_allocator(&p.names.arena),
-			)
+			p.names.lookup[idx], _ = strings.clone(name, mem.arena_allocator(&p.names.arena))
 			if !expect(p, ':') do return false
 			if !expect_line_end(p) do return false
 			current_parent = idx
@@ -607,19 +607,10 @@ expect_line_end :: proc(p: ^Parser) -> bool {
 // tails registered against this parent get patched onto the new event
 // so both branches of an upstream if-block converge on it.
 @(private)
-parser_add_event :: proc(
-	p: ^Parser,
-	parent: Source_Index,
-	event: Source_Event,
-) -> Source_Index {
+parser_add_event :: proc(p: ^Parser, parent: Source_Index, event: Source_Event) -> Source_Index {
 	new_idx: Source_Index
 	if p.sub_chain_head != nil && p.sub_chain_tail != nil {
-		new_idx = add_source_event_chain(
-			&p.source,
-			p.sub_chain_head,
-			p.sub_chain_tail,
-			event,
-		)
+		new_idx = add_source_event_chain(&p.source, p.sub_chain_head, p.sub_chain_tail, event)
 	} else {
 		new_idx = add_source_event(&p.source, parent, event)
 	}
@@ -665,7 +656,11 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 				beat = quantize(n.start_beat + time),
 				chance = NOTE_DEFAULT_CHANCE,
 				kind = Source_Note {
-					number = Note_Number{pitch1 = u8(n.number), pitch2 = u8(n.number), is_degree = false},
+					number = Note_Number {
+						pitch1 = u8(n.number),
+						pitch2 = u8(n.number),
+						is_degree = false,
+					},
 					velocity = I32_Range{n.velocity, n.velocity},
 					duration = max(quantize(n.duration), BEAT_QUANTUM),
 				},
@@ -866,7 +861,8 @@ capture_macro_body :: proc(p: ^Parser) -> string {
 		// Detect blank line: only horizontal whitespace and/or a
 		// comment, then newline (or EOF).
 		j := p.pos
-		for j < len(p.src) && (p.src[j] == ' ' || p.src[j] == '\t' || p.src[j] == '\r' || p.src[j] == ',') {
+		for j < len(p.src) &&
+		    (p.src[j] == ' ' || p.src[j] == '\t' || p.src[j] == '\r' || p.src[j] == ',') {
 			j += 1
 		}
 		if j < len(p.src) && p.src[j] == '#' {
@@ -943,11 +939,7 @@ parse_macro_arg_list :: proc(p: ^Parser) -> (args: []string, ok: bool) {
 // Result is allocated in the parser scratch arena. Unknown `$name`
 // is left intact (will produce a downstream parse error).
 @(private)
-substitute_macro_params :: proc(
-	p: ^Parser,
-	def: Macro_Def,
-	args: []string,
-) -> string {
+substitute_macro_params :: proc(p: ^Parser, def: Macro_Def, args: []string) -> string {
 	sb := strings.builder_make()
 	body := def.body
 	i := 0
@@ -1006,13 +998,7 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 	args, a_ok := parse_macro_arg_list(p)
 	if !a_ok do return false
 	if len(args) != len(def.params) {
-		parse_error(
-			p,
-			"macro %s expects %d argument(s), got %d",
-			name,
-			len(def.params),
-			len(args),
-		)
+		parse_error(p, "macro %s expects %d argument(s), got %d", name, len(def.params), len(args))
 		return false
 	}
 
@@ -1047,7 +1033,9 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 	}
 	inst := source_get(&p.source, inst_idx)
 	inst.chance = 100
-	inst.kind = Source_Timeline{rate = 1}
+	inst.kind = Source_Timeline {
+		rate = 1,
+	}
 	append(&p.macro_instances, inst_idx)
 	p.macro_instances_by_key[key] = inst_idx
 
@@ -1115,11 +1103,7 @@ parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
 	}
 	getter := lookup_predicate_getter(field_name)
 	if getter == nil {
-		parse_error(
-			p,
-			"unknown predicate field: %s (expected 'trans' or 'rate')",
-			field_name,
-		)
+		parse_error(p, "unknown predicate field: %s (expected 'trans' or 'rate')", field_name)
 		return false
 	}
 
@@ -1163,9 +1147,9 @@ parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
 			beat = quantize(beat),
 			chance = 100,
 			kind = Source_Fork {
-				get        = getter,
-				op         = op_proc,
-				constant   = constant,
+				get = getter,
+				op = op_proc,
+				constant = constant,
 				else_first = NIL_SOURCE,
 			},
 		},
@@ -1528,6 +1512,23 @@ parse_degree_note_event :: proc(
 }
 
 
+// Recognise `cc<digits>` as a CC offset kwarg name. Returns the CC
+// number 0..127, or false if the ident doesn't match the pattern.
+@(private)
+match_cc_kwarg :: proc(name: string) -> (number: i32, ok: bool) {
+	if len(name) < 3 do return
+	if name[0] != 'c' || name[1] != 'c' do return
+	n: i32 = 0
+	for i in 2 ..< len(name) {
+		c := name[i]
+		if c < '0' || c > '9' do return
+		n = n * 10 + i32(c - '0')
+	}
+	if n < 0 || n >= 128 do return
+	return n, true
+}
+
+
 @(private)
 try_parse_cc_number :: proc(p: ^Parser) -> (number: i32, ok: bool) {
 	if p.pos + 2 >= len(p.src) do return 0, false
@@ -1601,7 +1602,8 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected channel"); return false}
 			ch := i32(v)
-			if ch < 1 || ch > 16 {parse_error(p, "channel must be 1..16, got %d", ch); return false}
+			if ch < 1 ||
+			   ch > 16 {parse_error(p, "channel must be 1..16, got %d", ch); return false}
 			chan = u8(ch - 1)
 		case:
 			parse_error(p, "unknown CC argument: %s", arg_name)
