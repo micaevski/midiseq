@@ -216,13 +216,13 @@ SONG
 
 
 @(test)
-test_fork_trans_degrees_predicate :: proc(t: ^testing.T) {
-	// `if trans < 5d` reads the degrees field, not semitones. The
-	// parent INNER bumps degrees via `trans=2d`, leaving semitones at 0;
-	// without the `d` suffix the predicate would read semitones (0) and
-	// always take the then branch.
+test_fork_trans_combined_predicate :: proc(t: ^testing.T) {
+	// `if trans < 6` reads the unified transposition: semitones plus
+	// degrees converted to semitones via the timeline's scale. INNER
+	// bumps degrees via `trans=2d` under scale CPm, so the predicate
+	// sees 0 + degrees_to_semitones(2, CPm) = 5.
 	src := `INNER:
-if trans < 5d
+if trans < 6
 C4 1
 else
 C5 1
@@ -239,14 +239,14 @@ SONG
 	defer delete(ts.notes)
 	testing.expect(t, ok)
 	testing.expect_value(t, len(ts.notes), 1)
-	// degrees=2 < 5 → then branch → C4 with degrees=2 in CPm.
+	// 5 < 6 → then branch → C4 with degrees=2 in CPm.
 	// CPm is C minor pentatonic (offsets 0, 3, 5, 7, 10). C4=60, +2 deg → +5 semitones → 65.
 	testing.expect_value(t, ts.notes[0].number, i32(65))
 }
 
 
 @(test)
-test_fork_d_suffix_rejected_on_rate :: proc(t: ^testing.T) {
+test_fork_d_suffix_rejected_in_predicate :: proc(t: ^testing.T) {
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
 	src := `SONG:
@@ -257,7 +257,7 @@ end
 SONG
 `
 	_, ok := seq.parse_source(&parser, src)
-	testing.expect(t, !ok, "'d' suffix should fail on non-trans field")
+	testing.expect(t, !ok, "'d' suffix on a predicate constant should fail")
 }
 
 

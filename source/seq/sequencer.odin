@@ -109,7 +109,7 @@ start :: proc(sequencer: Sequencer_Handle) {
 		channel       = 0,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
-		velocity      = source_timeline.velocity,
+		velocity      = sample_range(source_timeline.velocity),
 		scale         = source_timeline.scale,
 	}
 	root_event.active_next = NIL_RUNTIME
@@ -321,9 +321,14 @@ Note_Number :: bit_field u32 {
 }
 
 
+I32_Range :: struct {
+	lo: i32,
+	hi: i32,
+}
+
 Source_Note :: struct {
 	number:   Note_Number,
-	velocity: i32, // 0..127
+	velocity: I32_Range, // 0..127; sampled on each emit
 	duration: f32, // in beats; note-off fires at start_beat + duration
 }
 
@@ -331,7 +336,7 @@ Source_Timeline :: struct {
 	first:         Source_Index,
 	transposition: Transposition,
 	rate:          f32, // time-scale multiplier
-	velocity:      i32, // additive offset applied to child notes
+	velocity:      I32_Range, // additive offset applied to child notes; sampled on each spawn
 	scale:         Scale, // zero-value (None) means "no scale set"
 	channel:       Maybe(u8),
 	free:          bool, // ref: spawn detaches from parent's lifecycle
@@ -346,7 +351,7 @@ Source_Fork :: struct {
 
 Source_CC :: struct {
 	number:  i32, // 0..127
-	value:   i32, // 0..127
+	value:   I32_Range, // 0..127; sampled on each emit
 	channel: Maybe(u8),
 }
 
@@ -391,8 +396,9 @@ Runtime_Kind :: union {
 Predicate_Getter :: proc(t: ^Runtime_Timeline) -> f32
 Predicate_Op :: proc(value, constant: f32) -> bool
 
-get_trans_semitones :: proc(t: ^Runtime_Timeline) -> f32 {return f32(t.transposition.semitones)}
-get_trans_degrees :: proc(t: ^Runtime_Timeline) -> f32 {return f32(t.transposition.degrees)}
+get_trans_semitones :: proc(t: ^Runtime_Timeline) -> f32 {
+	return f32(i32(t.transposition.semitones) + degrees_to_semitones(i32(t.transposition.degrees), t.scale))
+}
 get_rate :: proc(t: ^Runtime_Timeline) -> f32 {return t.rate}
 
 op_gt :: proc(a, b: f32) -> bool {return a > b}
@@ -420,6 +426,12 @@ Names :: struct {
 
 quantize :: proc(t: f32) -> f32 {
 	return math.round(t * f32(STEPS_PER_BEAT)) / f32(STEPS_PER_BEAT)
+}
+
+
+sample_range :: proc(r: I32_Range) -> i32 {
+	if r.hi <= r.lo do return r.lo
+	return r.lo + i32(rand.int_max(int(r.hi - r.lo + 1)))
 }
 
 
@@ -714,7 +726,7 @@ play_timeline :: proc(
 			}
 			sequencer.playing_notes[channel][number] = new_idx
 			sequencer.last_emit_beat[channel][number] = beat
-			sequencer.sink.note_on(&sequencer.sink, channel, number, clamp(k.velocity + timeline.velocity, 0, 127), beat)
+			sequencer.sink.note_on(&sequencer.sink, channel, number, clamp(sample_range(k.velocity) + timeline.velocity, 0, 127), beat)
 
 		case Source_Timeline:
 			new_idx = runtime_alloc(&sequencer.runtime_pool)
@@ -738,14 +750,14 @@ play_timeline :: proc(
 					degrees = i16(clamp(i32(k.transposition.degrees) + i32(timeline.transposition.degrees), -127, 127)),
 				},
 				rate = clamp(k.rate * timeline.rate, 1.0 / 1024.0, 1024.0),
-				velocity = clamp(k.velocity + timeline.velocity, -127, 127),
+				velocity = clamp(sample_range(k.velocity) + timeline.velocity, -127, 127),
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
 			}
 
 		case Source_CC:
 			channel := i32(k.channel.? or_else timeline.channel)
 			if channel >= 0 && channel < 16 && k.number >= 0 && k.number < 128 {
-				sequencer.sink.cc(&sequencer.sink, channel, k.number, clamp(k.value, 0, 127), beat)
+				sequencer.sink.cc(&sequencer.sink, channel, k.number, clamp(sample_range(k.value), 0, 127), beat)
 			}
 			timeline.cursor = cursor_event.next
 			continue

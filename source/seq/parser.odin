@@ -666,7 +666,7 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 				chance = NOTE_DEFAULT_CHANCE,
 				kind = Source_Note {
 					number = Note_Number{pitch1 = u8(n.number), pitch2 = u8(n.number), is_degree = false},
-					velocity = n.velocity,
+					velocity = I32_Range{n.velocity, n.velocity},
 					duration = max(quantize(n.duration), BEAT_QUANTUM),
 				},
 			},
@@ -715,7 +715,7 @@ parse_ref_event_with_target :: proc(
 
 	trans: Transposition
 	rate: f32 = 1
-	vel: i32 = 0
+	vel: I32_Range = {0, 0}
 	chance: i32 = 100
 	chan: Maybe(u8)
 	free: bool = auto_free
@@ -754,9 +754,9 @@ parse_ref_event_with_target :: proc(
 			rate = v
 		case "vel":
 			if !has_value {parse_error(p, "vel requires '=value'"); return false}
-			v, ok := parse_number(p)
+			r, ok := parse_int_range(p)
 			if !ok {parse_error(p, "expected velocity"); return false}
-			vel = i32(v)
+			vel = r
 		case "chance":
 			if !has_value {parse_error(p, "chance requires '=value'"); return false}
 			c, ok := parse_number(p)
@@ -1135,19 +1135,6 @@ parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
 		return false
 	}
 
-	// `12d` selects the scale-degrees variant of `trans`. Mirrors the
-	// `trans=2d` syntax on refs.
-	if p.pos < len(p.src) && p.src[p.pos] == 'd' {
-		p.pos += 1
-		p.col += 1
-		if field_name == "trans" {
-			getter = get_trans_degrees
-		} else {
-			parse_error(p, "'d' suffix not supported on '%s'", field_name)
-			return false
-		}
-	}
-
 	skip_inline_ws(p)
 	beat: f32 = 0
 	if !at_line_end(p) {
@@ -1426,7 +1413,7 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, lo, hi: i32) -> bool 
 		beat = v - 1
 	}
 
-	vel: i32 = NOTE_DEFAULT_VELOCITY
+	vel: I32_Range = {NOTE_DEFAULT_VELOCITY, NOTE_DEFAULT_VELOCITY}
 	dur: f32 = NOTE_DEFAULT_DURATION
 	chance: i32 = NOTE_DEFAULT_CHANCE
 
@@ -1439,9 +1426,9 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, lo, hi: i32) -> bool 
 
 		switch arg_name {
 		case "vel":
-			v, ok := parse_number(p)
+			r, ok := parse_int_range(p)
 			if !ok {parse_error(p, "expected velocity"); return false}
-			vel = i32(v)
+			vel = r
 		case "dur":
 			d, ok := parse_number(p)
 			if !ok {parse_error(p, "expected duration"); return false}
@@ -1488,7 +1475,7 @@ parse_degree_note_event :: proc(
 		beat = v - 1
 	}
 
-	vel: i32 = NOTE_DEFAULT_VELOCITY
+	vel: I32_Range = {NOTE_DEFAULT_VELOCITY, NOTE_DEFAULT_VELOCITY}
 	dur: f32 = NOTE_DEFAULT_DURATION
 	chance: i32 = NOTE_DEFAULT_CHANCE
 
@@ -1501,9 +1488,9 @@ parse_degree_note_event :: proc(
 
 		switch arg_name {
 		case "vel":
-			v, ok := parse_number(p)
+			r, ok := parse_int_range(p)
 			if !ok {parse_error(p, "expected velocity"); return false}
-			vel = i32(v)
+			vel = r
 		case "dur":
 			d, ok := parse_number(p)
 			if !ok {parse_error(p, "expected duration"); return false}
@@ -1588,7 +1575,7 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 		beat = v - 1
 	}
 
-	val: i32 = 0
+	val: I32_Range = {0, 0}
 	have_val := false
 	chance: i32 = 100
 	chan: Maybe(u8)
@@ -1602,9 +1589,9 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 
 		switch arg_name {
 		case "val":
-			v, ok := parse_number(p)
+			r, ok := parse_int_range(p)
 			if !ok {parse_error(p, "expected value"); return false}
-			val = i32(v)
+			val = r
 			have_val = true
 		case "chance":
 			c, ok := parse_number(p)
@@ -2059,6 +2046,27 @@ parse_number :: proc(p: ^Parser) -> (f32, bool) {
 	}
 	n, ok := strconv.parse_f32(p.src[start:p.pos])
 	return n, ok
+}
+
+
+// Parse `N` or `N-M` as an integer range. `-` between two numbers is a
+// range separator; a leading `-` on either bound is a sign. Auto-swaps
+// when lo > hi.
+@(private)
+parse_int_range :: proc(p: ^Parser) -> (I32_Range, bool) {
+	v1, ok1 := parse_number(p)
+	if !ok1 do return I32_Range{}, false
+	lo := i32(v1)
+	hi := lo
+	if p.pos < len(p.src) && p.src[p.pos] == '-' {
+		p.pos += 1
+		p.col += 1
+		v2, ok2 := parse_number(p)
+		if !ok2 {parse_error(p, "expected number after '-' in range"); return I32_Range{}, false}
+		hi = i32(v2)
+		if hi < lo do lo, hi = hi, lo
+	}
+	return I32_Range{lo = lo, hi = hi}, true
 }
 
 @(private)
