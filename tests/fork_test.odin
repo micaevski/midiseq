@@ -28,8 +28,11 @@ test_note_on :: proc(user: rawptr, channel, number, velocity: i32, beat: f32) {
 test_note_off :: proc(user: rawptr, channel, number: i32, beat: f32) {}
 
 @(private = "file")
+test_cc :: proc(user: rawptr, channel, number, value: i32, beat: f32) {}
+
+@(private = "file")
 make_test_sink :: proc(ts: ^Test_Sink) -> seq.Sink {
-	return seq.Sink{user = ts, note_on = test_note_on, note_off = test_note_off}
+	return seq.Sink{user = ts, note_on = test_note_on, note_off = test_note_off, cc = test_cc}
 }
 
 

@@ -449,6 +449,10 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 
 		// Event or SEED. Notes start with a note letter, and might
 		// otherwise look like an ident; try the note pattern first.
+		if num, is_cc := try_parse_cc_number(p); is_cc {
+			if !parse_cc_event(p, current_parent, num) do return false
+			continue
+		}
 		if lo, hi, is_note := try_parse_note_range(p); is_note {
 			if !parse_note_event(p, current_parent, lo, hi) do return false
 			continue
@@ -539,6 +543,10 @@ pass_2_body :: proc(p: ^Parser, parent: Source_Index) -> bool {
 			return false
 		}
 
+		if num, is_cc := try_parse_cc_number(p); is_cc {
+			if !parse_cc_event(p, parent, num) do return false
+			continue
+		}
 		if lo, hi, is_note := try_parse_note_range(p); is_note {
 			if !parse_note_event(p, parent, lo, hi) do return false
 			continue
@@ -1266,6 +1274,10 @@ parse_fork_branch :: proc(p: ^Parser, parent: Source_Index, saw_else: ^bool) -> 
 			continue
 		}
 
+		if num, is_cc := try_parse_cc_number(p); is_cc {
+			if !parse_cc_event(p, parent, num) do return false
+			continue
+		}
 		if lo, hi, is_note := try_parse_note_range(p); is_note {
 			if !parse_note_event(p, parent, lo, hi) do return false
 			continue
@@ -1527,6 +1539,103 @@ parse_degree_note_event :: proc(
 	)
 	return true
 }
+
+
+@(private)
+try_parse_cc_number :: proc(p: ^Parser) -> (number: i32, ok: bool) {
+	if p.pos + 2 >= len(p.src) do return 0, false
+	if p.src[p.pos] != 'C' || p.src[p.pos + 1] != 'C' do return 0, false
+	if !is_digit(p.src[p.pos + 2]) do return 0, false
+
+	save_pos := p.pos
+	save_col := p.col
+	p.pos += 2
+	p.col += 2
+
+	n: i32 = 0
+	for p.pos < len(p.src) && is_digit(p.src[p.pos]) {
+		n = n * 10 + i32(p.src[p.pos] - '0')
+		p.pos += 1
+		p.col += 1
+	}
+
+	if p.pos < len(p.src) {
+		c := p.src[p.pos]
+		if is_alpha(c) || c == '_' {
+			p.pos = save_pos
+			p.col = save_col
+			return 0, false
+		}
+	}
+	return n, true
+}
+
+
+// CC<n> [time] val=V [chan=C] [chance=C]
+@(private)
+parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
+	if number < 0 || number >= 128 {
+		parse_error(p, "CC number must be 0..127, got %d", number)
+		return false
+	}
+
+	skip_inline_ws(p)
+	beat: f32 = 0
+	if !at_line_end(p) && !is_kwarg_start(p) {
+		v, ok := parse_number(p)
+		if !ok {parse_error(p, "expected time or kwarg"); return false}
+		if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
+		beat = v - 1
+	}
+
+	val: i32 = 0
+	have_val := false
+	chance: i32 = 100
+	chan: Maybe(u8)
+
+	for {
+		if at_line_end(p) do break
+
+		arg_name, ok_a := parse_ident(p)
+		if !ok_a {parse_error(p, "expected argument name"); return false}
+		if !expect(p, '=') do return false
+
+		switch arg_name {
+		case "val":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected value"); return false}
+			val = i32(v)
+			have_val = true
+		case "chance":
+			c, ok := parse_number(p)
+			if !ok {parse_error(p, "expected chance"); return false}
+			chance = i32(c)
+		case "chan":
+			v, ok := parse_number(p)
+			if !ok {parse_error(p, "expected channel"); return false}
+			ch := i32(v)
+			if ch < 1 || ch > 16 {parse_error(p, "channel must be 1..16, got %d", ch); return false}
+			chan = u8(ch - 1)
+		case:
+			parse_error(p, "unknown CC argument: %s", arg_name)
+			return false
+		}
+	}
+
+	if !have_val {parse_error(p, "CC requires val=V"); return false}
+
+	parser_add_event(
+		p,
+		parent,
+		Source_Event {
+			beat = quantize(beat),
+			chance = chance,
+			kind = Source_CC{number = number, value = val, channel = chan},
+		},
+	)
+	return true
+}
+
 
 // `name=...` form: returns true if the next token on the current line
 // is an ident immediately followed by `=`.

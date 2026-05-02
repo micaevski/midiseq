@@ -275,7 +275,12 @@ midi_sink :: proc(midi: ^Midi_IO) -> seq.Sink {
 		if midi.out_stream == nil do return
 		midi_note_off(midi, channel, number, beat)
 	}
-	return seq.Sink{user = midi, note_on = on, note_off = off}
+	cc :: proc(user: rawptr, channel, number, value: i32, beat: f32) {
+		midi := cast(^Midi_IO)(cast(^seq.Sink)user).user
+		if midi.out_stream == nil do return
+		midi_cc(midi, channel, number, value, beat)
+	}
+	return seq.Sink{user = midi, note_on = on, note_off = off, cc = cc}
 }
 
 midi_note_on :: proc(midi: ^Midi_IO, channel, number, velocity: i32, beat: f32) {
@@ -289,5 +294,14 @@ midi_note_on :: proc(midi: ^Midi_IO, channel, number, velocity: i32, beat: f32) 
 
 midi_note_off :: proc(midi: ^Midi_IO, channel, number: i32, beat: f32) {
 	pm.WriteShort(midi.out_stream, 0, pm.MessageMake(0x80 | c.int(channel), c.int(number), 0))
+	midi.events_in_frame += 1
+}
+
+midi_cc :: proc(midi: ^Midi_IO, channel, number, value: i32, beat: f32) {
+	pm.WriteShort(
+		midi.out_stream,
+		0,
+		pm.MessageMake(0xB0 | c.int(channel), c.int(number), c.int(value)),
+	)
 	midi.events_in_frame += 1
 }

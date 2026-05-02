@@ -81,6 +81,16 @@ scale_size :: proc(scale: Scale) -> i32 {
 }
 
 
+degrees_to_semitones :: proc(degrees: i32, scale: Scale) -> i32 {
+	offsets := scale_offsets(scale.kind)
+	size := i32(len(offsets))
+	if size == 0 do return degrees
+	octave_delta := floor_div(degrees, size)
+	degree_idx := mod_pos(degrees, size)
+	return offsets[degree_idx] + octave_delta * 12
+}
+
+
 midi_from_pos :: proc(pos: i32, scale: Scale) -> i32 {
 	offsets := scale_offsets(scale.kind)
 	size := i32(len(offsets))

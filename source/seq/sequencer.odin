@@ -28,6 +28,7 @@ Sink :: struct {
 	user:     rawptr,
 	note_on:  proc(user: rawptr, channel, number, velocity: i32, beat: f32),
 	note_off: proc(user: rawptr, channel, number: i32, beat: f32),
+	cc:       proc(user: rawptr, channel, number, value: i32, beat: f32),
 }
 
 
@@ -343,10 +344,17 @@ Source_Fork :: struct {
 	else_first: Source_Index,
 }
 
+Source_CC :: struct {
+	number:  i32, // 0..127
+	value:   i32, // 0..127
+	channel: Maybe(u8),
+}
+
 Source_Kind :: union {
 	Source_Note,
 	Source_Timeline,
 	Source_Fork,
+	Source_CC,
 }
 
 Source_Event :: struct {
@@ -733,6 +741,14 @@ play_timeline :: proc(
 				velocity = clamp(k.velocity + timeline.velocity, -127, 127),
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
 			}
+
+		case Source_CC:
+			channel := i32(k.channel.? or_else timeline.channel)
+			if channel >= 0 && channel < 16 && k.number >= 0 && k.number < 128 {
+				sequencer.sink.cc(&sequencer.sink, channel, k.number, clamp(k.value, 0, 127), beat)
+			}
+			timeline.cursor = cursor_event.next
+			continue
 		}
 
 		if spawn_tail == NIL_RUNTIME {
