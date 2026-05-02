@@ -39,6 +39,16 @@ Parser :: struct {
 	macro_instances:        [dynamic]Source_Index,
 	macro_instances_by_key: map[string]Source_Index,
 	macro_depth:            int,
+	pending_tails:          [dynamic]Pending_Tail,
+	sub_chain_head:         ^Source_Index,
+	sub_chain_tail:         ^Source_Index,
+}
+
+
+@(private)
+Pending_Tail :: struct {
+	parent: Source_Index,
+	tail:   Source_Index,
 }
 
 
@@ -85,10 +95,6 @@ destroy_parser :: proc(p: ^Parser) {
 
 parse_file :: proc(parser: ^Parser, path: string) -> (root: Source_Index, ok: bool) {
 	parser.last_error = ""
-	// Reset scratch and load the file into it. The bytes will live for
-	// the rest of the parse (parse_source_internal won't reset). Doing
-	// the reset ourselves means parse_source_internal can be called with
-	// `src` already in scratch without invalidating it.
 	mem.arena_free_all(&parser.scratch)
 	context.allocator = mem.arena_allocator(&parser.scratch)
 
@@ -150,6 +156,7 @@ parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Ind
 	parser.macro_instances = make([dynamic]Source_Index, 0, 32)
 	parser.macro_instances_by_key = make(map[string]Source_Index, 32)
 	parser.macro_depth = 0
+	parser.pending_tails = make([dynamic]Pending_Tail, 0, 8)
 
 	parser.src = src
 	parser.pos = 0
@@ -165,7 +172,7 @@ parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Ind
 	}
 	root_event := source_get(&parser.source, root)
 	root_event.chance = 100
-	root_event.kind = Source_Timeline{rate = 1, channel = -1}
+	root_event.kind = Source_Timeline{rate = 1}
 	root_name, _ := strings.clone(ROOT_NAME, mem.arena_allocator(&parser.names.arena))
 	parser.names.lookup[root] = root_name
 	parser.names.by_name[root_name] = root
@@ -187,6 +194,16 @@ parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Ind
 	// children chain head.
 	resolve_references(parser)
 
+	// Expose every macro instance under its memo key in the public
+	// name map. `adapt_to_source` looks up runtime events by name; with
+	// this in place a running macro-instance runtime survives a reparse
+	// (gets remapped to the new instance with the same key) instead of
+	// retiring and leaving a silent gap.
+	for key, inst_idx in parser.macro_instances_by_key {
+		cloned, _ := strings.clone(key, mem.arena_allocator(&parser.names.arena))
+		parser.names.by_name[cloned] = inst_idx
+	}
+
 	return root, true
 }
 
@@ -197,7 +214,8 @@ parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Ind
 // the target's children chain head. Macro instances themselves are
 // children of their caller but they own a real chain — they're
 // recognised via the `instance_set` lookup so we don't mistake them
-// for refs.
+// for refs. Forks redirect: when we hit one we also recurse through
+// `else_first` so refs in the else-branch get resolved.
 @(private)
 resolve_references :: proc(p: ^Parser) {
 	instance_set := make(map[Source_Index]bool, len(p.macro_instances))
@@ -207,20 +225,33 @@ resolve_references :: proc(p: ^Parser) {
 		parent_event := source_get(&p.source, parent_idx)
 		parent_timeline, ok := parent_event.kind.(Source_Timeline)
 		if !ok do return
+		visited := make(map[Source_Index]bool, 16, context.temp_allocator)
+		defer delete(visited)
+		walk_chain(p, parent_timeline.first, instance_set, &visited)
+	}
 
-		child_index := parent_timeline.first
-		for child_index != NIL_SOURCE {
-			child := source_get(&p.source, child_index)
+	walk_chain :: proc(
+		p: ^Parser,
+		head: Source_Index,
+		instance_set: map[Source_Index]bool,
+		visited: ^map[Source_Index]bool,
+	) {
+		walker := head
+		for walker != NIL_SOURCE && !visited[walker] {
+			visited[walker] = true
+			child := source_get(&p.source, walker)
 			next := child.next
 			if _, is_timeline := child.kind.(Source_Timeline); is_timeline {
-				if !instance_set[child_index] {
+				if !instance_set[walker] {
 					ref_timeline := &child.kind.(Source_Timeline)
 					target := ref_timeline.first
 					ref_timeline.first =
 						source_get(&p.source, target).kind.(Source_Timeline).first
 				}
+			} else if fork, is_fork := child.kind.(Source_Fork); is_fork {
+				walk_chain(p, fork.else_first, instance_set, visited)
 			}
-			child_index = next
+			walker = next
 		}
 	}
 
@@ -261,6 +292,10 @@ pass_1 :: proc(p: ^Parser) -> bool {
 				parse_error(p, "%q is reserved as the implicit root name", ROOT_NAME)
 				return false
 			}
+			if name == "if" || name == "else" || name == "end" {
+				parse_error(p, "%q is reserved as an if-block keyword", name)
+				return false
+			}
 			if is_note_name_string(name) || is_degree_note_name_string(name) {
 				parse_error(p, "note name %s cannot be used as a label", name)
 				return false
@@ -295,7 +330,7 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			}
 			top_event := source_get(&p.source, idx)
 			top_event.chance = 100
-			top_event.kind = Source_Timeline{rate = 1, channel = -1}
+			top_event.kind = Source_Timeline{rate = 1}
 			p.names.by_name[name] = idx
 			if !expect(p, ':') do return false
 			continue
@@ -444,6 +479,15 @@ pass_2 :: proc(p: ^Parser, root: Source_Index) -> bool {
 			return false
 		}
 
+		if name == "if" {
+			if !parse_if_block(p, current_parent) do return false
+			continue
+		}
+		if name == "else" || name == "end" {
+			parse_error(p, "'%s' outside 'if' block", name)
+			return false
+		}
+
 		// Macro invocation: NAME(args).
 		if p.pos < len(p.src) && p.src[p.pos] == '(' {
 			if !parse_macro_invocation(p, name, current_parent) do return false
@@ -512,6 +556,15 @@ pass_2_body :: proc(p: ^Parser, parent: Source_Index) -> bool {
 		name, ok := parse_ident(p)
 		if !ok {parse_error(p, "expected identifier"); return false}
 
+		if name == "if" {
+			if !parse_if_block(p, parent) do return false
+			continue
+		}
+		if name == "else" || name == "end" {
+			parse_error(p, "'%s' outside 'if' block", name)
+			return false
+		}
+
 		if p.pos < len(p.src) && p.src[p.pos] == '(' {
 			if !parse_macro_invocation(p, name, parent) do return false
 			continue
@@ -540,6 +593,43 @@ expect_line_end :: proc(p: ^Parser) -> bool {
 }
 
 
+// Wrapper around the chain-insertion helper. If a sub-chain is active
+// (we're inside a fork's else-branch parse), the event lands there;
+// otherwise it goes into `parent`'s main chain. Either way, branch
+// tails registered against this parent get patched onto the new event
+// so both branches of an upstream if-block converge on it.
+@(private)
+parser_add_event :: proc(
+	p: ^Parser,
+	parent: Source_Index,
+	event: Source_Event,
+) -> Source_Index {
+	new_idx: Source_Index
+	if p.sub_chain_head != nil && p.sub_chain_tail != nil {
+		new_idx = add_source_event_chain(
+			&p.source,
+			p.sub_chain_head,
+			p.sub_chain_tail,
+			event,
+		)
+	} else {
+		new_idx = add_source_event(&p.source, parent, event)
+	}
+	if new_idx == NIL_SOURCE do return NIL_SOURCE
+	i := 0
+	for i < len(p.pending_tails) {
+		if p.pending_tails[i].parent == parent {
+			tail_idx := p.pending_tails[i].tail
+			source_get(&p.source, tail_idx).next = new_idx
+			ordered_remove(&p.pending_tails, i)
+		} else {
+			i += 1
+		}
+	}
+	return new_idx
+}
+
+
 // Read `path` from disk, parse it as a Standard MIDI File, and add a
 // Note source-event to `parent` for each parsed note (offset by `time`).
 // Path is resolved relative to the current working directory. On any
@@ -560,8 +650,8 @@ load_midi_into :: proc(p: ^Parser, path: string, parent: Source_Index, time: f32
 	}
 
 	for n in notes {
-		add_source_event(
-			&p.source,
+		parser_add_event(
+			p,
 			parent,
 			Source_Event {
 				beat = quantize(n.start_beat + time),
@@ -618,7 +708,7 @@ parse_ref_event_with_target :: proc(
 	trans: Transposition
 	rate: f32 = 1
 	chance: i32 = 100
-	chan: i32 = -1
+	chan: Maybe(u8)
 	free: bool = auto_free
 	scale: Scale
 	for {
@@ -673,7 +763,7 @@ parse_ref_event_with_target :: proc(
 				parse_error(p, "channel must be 1..16, got %d", ch)
 				return false
 			}
-			chan = ch - 1
+			chan = u8(ch - 1)
 		case:
 			parse_error(p, "unknown reference argument: %s", arg_name)
 			return false
@@ -683,15 +773,15 @@ parse_ref_event_with_target :: proc(
 	// Stash the target's index in `first`. It gets rewritten to the
 	// target's actual children chain head by resolve_references after
 	// every top-level body has been parsed.
-	ref_idx := add_source_event(
-		&p.source,
+	ref_idx := parser_add_event(
+		p,
 		parent,
 		Source_Event {
 			beat = quantize(beat),
 			chance = chance,
 			kind = Source_Timeline {
 				first = target,
-				channel = i8(chan),
+				channel = chan,
 				transposition = trans,
 				rate = rate,
 				free = free,
@@ -925,9 +1015,13 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 	// ref to the already-built instance instead of recursing. The
 	// instance is registered in the memo *before* its body is parsed
 	// so a self-reference inside the body finds it.
+	//
+	// Refs to a macro instance use the full key as their display
+	// name; that's what `adapt_to_source` keys off of to remap a
+	// running macro-instance runtime across a reparse.
 	key := build_macro_key(name, args)
 	if existing, found := p.macro_instances_by_key[key]; found {
-		return parse_ref_event_with_target(p, existing, name, parent, auto_free)
+		return parse_ref_event_with_target(p, existing, key, parent, auto_free)
 	}
 
 	inst_idx := source_alloc(&p.source)
@@ -937,21 +1031,28 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 	}
 	inst := source_get(&p.source, inst_idx)
 	inst.chance = 100
-	inst.kind = Source_Timeline{rate = 1, channel = -1}
+	inst.kind = Source_Timeline{rate = 1}
 	append(&p.macro_instances, inst_idx)
 	p.macro_instances_by_key[key] = inst_idx
 
 	body := substitute_macro_params(p, def, args)
 
-	// Parse the substituted body into the anonymous timeline.
+	// Parse the substituted body into the anonymous timeline. Sub-chain
+	// pointers must reset for the body parse so the macro's events land
+	// in `inst_idx` rather than leaking into an enclosing sub-chain
+	// (e.g., the else branch we may currently be inside).
 	saved_src := p.src
 	saved_pos := p.pos
 	saved_line := p.line
 	saved_col := p.col
+	saved_sub_head := p.sub_chain_head
+	saved_sub_tail := p.sub_chain_tail
 	p.src = body
 	p.pos = 0
 	p.line = 1
 	p.col = 1
+	p.sub_chain_head = nil
+	p.sub_chain_tail = nil
 	p.macro_depth += 1
 	body_ok := pass_2_body(p, inst_idx)
 	p.macro_depth -= 1
@@ -959,11 +1060,311 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 	p.pos = saved_pos
 	p.line = saved_line
 	p.col = saved_col
+	p.sub_chain_head = saved_sub_head
+	p.sub_chain_tail = saved_sub_tail
 	if !body_ok do return false
 
 	// Now treat the invocation as a ref to the anon timeline. Read the
 	// trailing beat and any kwargs (rate=, trans=, ...).
-	return parse_ref_event_with_target(p, inst_idx, name, parent, auto_free)
+	return parse_ref_event_with_target(p, inst_idx, key, parent, auto_free)
+}
+
+
+// `if FIELD OP CONST [beat]` opens a conditional block.
+//
+// Layout produced:
+//   - The fork is added to the parent's chain at the if-line beat.
+//   - Then-branch events are added directly to the parent's chain
+//     (so the natural `.next` walk from the fork follows the
+//     then-branch).
+//   - Else-branch events are added into an anonymous timeline whose
+//     `.first` chain becomes `fork.else_first` — that's the only
+//     edge into the else-branch.
+//   - Both branch tails get patched, when the next event is added to
+//     the parent (the post-if event), so the chain rejoins on a
+//     single shared event. If no post-if event is parsed, tails stay
+//     at NIL and the branches end the parent's chain.
+//
+// At runtime `play_timeline` lands on the fork, evaluates the
+// predicate against the live parent, and redirects the cursor to
+// either `cursor_event.next` (then-branch) or `fork.else_first`
+// (else-branch); no synthetic timeline is allocated.
+@(private)
+parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
+	skip_inline_ws(p)
+	field_name, ok_f := parse_ident(p)
+	if !ok_f {
+		parse_error(p, "expected predicate field after 'if'")
+		return false
+	}
+	getter := lookup_predicate_getter(field_name)
+	if getter == nil {
+		parse_error(
+			p,
+			"unknown predicate field: %s (expected 'trans' or 'rate')",
+			field_name,
+		)
+		return false
+	}
+
+	op_proc, ok_op := parse_op_token(p)
+	if !ok_op {
+		parse_error(p, "expected comparison operator (>, <, ==, !=, >=, <=)")
+		return false
+	}
+
+	constant, ok_c := parse_number(p)
+	if !ok_c {
+		parse_error(p, "expected constant in predicate")
+		return false
+	}
+
+	// `12d` selects the scale-degrees variant of `trans`. Mirrors the
+	// `trans=2d` syntax on refs.
+	if p.pos < len(p.src) && p.src[p.pos] == 'd' {
+		p.pos += 1
+		p.col += 1
+		if field_name == "trans" {
+			getter = get_trans_degrees
+		} else {
+			parse_error(p, "'d' suffix not supported on '%s'", field_name)
+			return false
+		}
+	}
+
+	skip_inline_ws(p)
+	beat: f32 = 0
+	if !at_line_end(p) {
+		v, ok_b := parse_number(p)
+		if !ok_b {
+			parse_error(p, "unexpected content after predicate")
+			return false
+		}
+		if v < 1 {parse_error(p, "time is 1-indexed; %.3g is invalid", v); return false}
+		beat = v - 1
+	}
+	if !expect_line_end(p) do return false
+	if p.pos < len(p.src) && p.src[p.pos] == '\n' {
+		p.pos += 1
+		p.line += 1
+		p.col = 1
+	}
+
+	// Add the fork to the parent's chain. Its `.next` will be set by
+	// the chain insertion logic when then-branch events arrive (they
+	// follow the fork in beat order).
+	fork_idx := parser_add_event(
+		p,
+		parent,
+		Source_Event {
+			beat = quantize(beat),
+			chance = 100,
+			kind = Source_Fork {
+				get        = getter,
+				op         = op_proc,
+				constant   = constant,
+				else_first = NIL_SOURCE,
+			},
+		},
+	)
+	if fork_idx == NIL_SOURCE {
+		parse_error(p, "source storage full")
+		return false
+	}
+
+	// Then-branch events are added directly to the parent's chain via
+	// `parser_add_event`; their `.next` is set automatically by
+	// `add_source_event`'s beat-ordered insertion when the post-if
+	// event arrives, so no explicit pending-tail registration is
+	// needed for the then-branch.
+	saw_else: bool
+	if !parse_fork_branch(p, parent, &saw_else) do return false
+
+	if saw_else {
+		// Parse the else-branch into a free-standing sub-chain whose
+		// head/tail live on this stack frame. Routing through
+		// `sub_chain_head`/`sub_chain_tail` makes `parser_add_event`
+		// append into the sub-chain instead of the parent's main
+		// chain. We save+restore the parser's previous sub-chain
+		// pointers so nested if-blocks inside an else compose.
+		else_head: Source_Index = NIL_SOURCE
+		else_tail: Source_Index = NIL_SOURCE
+		prev_head := p.sub_chain_head
+		prev_tail := p.sub_chain_tail
+		p.sub_chain_head = &else_head
+		p.sub_chain_tail = &else_tail
+
+		saw_else_again: bool
+		branch_ok := parse_fork_branch(p, parent, &saw_else_again)
+
+		p.sub_chain_head = prev_head
+		p.sub_chain_tail = prev_tail
+		if !branch_ok do return false
+		if saw_else_again {
+			parse_error(p, "duplicate 'else' in 'if' block")
+			return false
+		}
+
+		(&source_get(&p.source, fork_idx).kind.(Source_Fork)).else_first = else_head
+		if else_tail != NIL_SOURCE {
+			append(&p.pending_tails, Pending_Tail{parent = parent, tail = else_tail})
+		}
+	}
+	return true
+}
+
+
+// Parse the body of one if-branch — events go into `parent`. Stops
+// when it sees `else` or `end` (consuming the keyword and its line).
+// `end` is also implicit at the end of the enclosing definition: a
+// blank line or EOF closes the branch (and cascades through any
+// open outer if-blocks). The parser position is restored before the
+// implicit terminator so the outer scope sees the blank/EOF
+// normally and resets parent to root accordingly.
+@(private)
+parse_fork_branch :: proc(p: ^Parser, parent: Source_Index, saw_else: ^bool) -> bool {
+	saw_else^ = false
+	for {
+		saved_pos := p.pos
+		saved_line := p.line
+		saved_col := p.col
+		crossed_blank := skip_ws_track_blank(p)
+		if crossed_blank || p.pos >= len(p.src) {
+			p.pos = saved_pos
+			p.line = saved_line
+			p.col = saved_col
+			return true
+		}
+
+		c := p.src[p.pos]
+
+		if peek_line_has_colon(p) {
+			parse_error(p, "definition not allowed inside 'if' block")
+			return false
+		}
+
+		if c == '"' {
+			path, ok_s := parse_string_literal(p)
+			if !ok_s do return false
+			skip_inline_ws(p)
+			time: f32 = 0
+			if !at_line_end(p) {
+				v, ok := parse_number(p)
+				if !ok {parse_error(p, "expected time after path"); return false}
+				time = v - 1
+			}
+			if !expect_line_end(p) do return false
+			if !load_midi_into(p, path, parent, time) do return false
+			continue
+		}
+
+		if lo, hi, is_note := try_parse_note_range(p); is_note {
+			if !parse_note_event(p, parent, lo, hi) do return false
+			continue
+		}
+		if dlo, olo, dhi, ohi, is_deg := try_parse_degree_range(p); is_deg {
+			if !parse_degree_note_event(p, parent, dlo, olo, dhi, ohi) do return false
+			continue
+		}
+
+		if !is_ident_start(c) {
+			parse_error(p, "unexpected character %c", rune(c))
+			return false
+		}
+
+		name, ok := parse_ident(p)
+		if !ok {parse_error(p, "expected identifier"); return false}
+
+		if name == "else" {
+			saw_else^ = true
+			if !expect_line_end(p) do return false
+			return true
+		}
+		if name == "end" {
+			// Leave the trailing newline in place so the caller's
+			// skip_ws_track_blank can still see a blank line after the
+			// if-block and reset to root scope.
+			if !expect_line_end(p) do return false
+			return true
+		}
+		if name == "if" {
+			if !parse_if_block(p, parent) do return false
+			continue
+		}
+
+		if p.pos < len(p.src) && p.src[p.pos] == '(' {
+			if !parse_macro_invocation(p, name, parent) do return false
+			continue
+		}
+
+		auto_free := false
+		if p.pos < len(p.src) && p.src[p.pos] == '!' {
+			p.pos += 1
+			p.col += 1
+			auto_free = true
+		}
+
+		if !parse_ref_event(p, name, parent, auto_free) do return false
+	}
+}
+
+
+// Match a 1- or 2-character comparison operator at the current
+// position. Advances past it on success and returns the matching
+// op proc. Recognises >, <, ==, !=, >=, <=.
+@(private)
+parse_op_token :: proc(p: ^Parser) -> (op: Predicate_Op, ok: bool) {
+	skip_inline_ws(p)
+	if p.pos >= len(p.src) do return nil, false
+	c := p.src[p.pos]
+	next_c: u8 = 0
+	if p.pos + 1 < len(p.src) do next_c = p.src[p.pos + 1]
+
+	switch c {
+	case '>':
+		if next_c == '=' {
+			p.pos += 2
+			p.col += 2
+			return op_geq, true
+		}
+		p.pos += 1
+		p.col += 1
+		return op_gt, true
+	case '<':
+		if next_c == '=' {
+			p.pos += 2
+			p.col += 2
+			return op_leq, true
+		}
+		p.pos += 1
+		p.col += 1
+		return op_lt, true
+	case '=':
+		if next_c == '=' {
+			p.pos += 2
+			p.col += 2
+			return op_eq, true
+		}
+	case '!':
+		if next_c == '=' {
+			p.pos += 2
+			p.col += 2
+			return op_neq, true
+		}
+	}
+	return nil, false
+}
+
+
+@(private)
+lookup_predicate_getter :: proc(name: string) -> Predicate_Getter {
+	switch name {
+	case "trans":
+		return get_trans_semitones
+	case "rate":
+		return get_rate
+	}
+	return nil
 }
 
 
@@ -1035,8 +1436,8 @@ parse_note_event :: proc(p: ^Parser, parent: Source_Index, lo, hi: i32) -> bool 
 		}
 	}
 
-	add_source_event(
-		&p.source,
+	parser_add_event(
+		p,
 		parent,
 		Source_Event {
 			beat = quantize(beat),
@@ -1097,8 +1498,8 @@ parse_degree_note_event :: proc(
 		}
 	}
 
-	add_source_event(
-		&p.source,
+	parser_add_event(
+		p,
 		parent,
 		Source_Event {
 			beat = quantize(beat),

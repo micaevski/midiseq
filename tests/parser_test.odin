@@ -38,6 +38,163 @@ SONG
 }
 
 
+// ============================================================================
+// Source-chain layout tests for parse_if_block.
+// These assert directly against `parser.source` after a parse so we
+// know the structure the runtime is going to walk, independent of any
+// runtime behaviour.
+// ============================================================================
+
+
+// Resolve a label header to its first chain-event index.
+@(private = "file")
+chain_first :: proc(parser: ^seq.Parser, name: string) -> seq.Source_Index {
+	idx := parser.names.by_name[name]
+	return seq.source_get(&parser.source, idx).kind.(seq.Source_Timeline).first
+}
+
+
+@(test)
+test_parse_fork_chain_then_only_terminal :: proc(t: ^testing.T) {
+	// `if X / C4 / end` with nothing after `end`. Expected layout in
+	// INNER's chain:
+	//   fork → C4 → NIL
+	//   fork.else_first = NIL  (no else branch)
+	src := `INNER:
+if trans > 5
+C4 1
+end
+`
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "parse should succeed")
+
+	fork_idx := chain_first(&parser, "INNER")
+	fork_event := seq.source_get(&parser.source, fork_idx)
+	fork, is_fork := fork_event.kind.(seq.Source_Fork)
+	testing.expect(t, is_fork, "INNER's first event should be the fork")
+	testing.expect_value(t, fork.else_first, seq.NIL_SOURCE)
+
+	c4_idx := fork_event.next
+	testing.expect(t, c4_idx != seq.NIL_SOURCE, "fork.next should reach C4")
+
+	c4_event := seq.source_get(&parser.source, c4_idx)
+	_, is_note := c4_event.kind.(seq.Source_Note)
+	testing.expect(t, is_note, "fork.next should be a note")
+	testing.expect_value(t, c4_event.next, seq.NIL_SOURCE)
+}
+
+
+@(test)
+test_parse_fork_chain_then_else_terminal :: proc(t: ^testing.T) {
+	// `if X / C4 / else / C5 / end` with nothing after `end`. Expected:
+	//   main:        fork → C4 → NIL
+	//   else-branch: C5 → NIL  (reached only via fork.else_first)
+	src := `INNER:
+if trans > 5
+C4 1
+else
+C5 1
+end
+`
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "parse should succeed")
+
+	fork_idx := chain_first(&parser, "INNER")
+	fork_event := seq.source_get(&parser.source, fork_idx)
+	fork, is_fork := fork_event.kind.(seq.Source_Fork)
+	testing.expect(t, is_fork)
+
+	c4_idx := fork_event.next
+	c4_event := seq.source_get(&parser.source, c4_idx)
+	_, is_note := c4_event.kind.(seq.Source_Note)
+	testing.expect(t, is_note, "fork.next should be then-branch C4")
+	testing.expect_value(t, c4_event.next, seq.NIL_SOURCE)
+
+	testing.expect(t, fork.else_first != seq.NIL_SOURCE)
+	c5_event := seq.source_get(&parser.source, fork.else_first)
+	_, is_else_note := c5_event.kind.(seq.Source_Note)
+	testing.expect(t, is_else_note, "fork.else_first should be else-branch C5")
+	testing.expect_value(t, c5_event.next, seq.NIL_SOURCE)
+
+	// fork.else_first must be a different event from fork.next
+	testing.expect(t, fork.else_first != c4_idx, "else and then heads must differ")
+}
+
+
+@(test)
+test_parse_fork_chain_then_else_with_post_if :: proc(t: ^testing.T) {
+	// Both branch tails should rejoin on the post-if event when one is
+	// added after `end`:
+	//   main:        fork → C4 → C6 → NIL
+	//   else-branch: C5 → C6  (patched via pending_tails when C6 added)
+	src := `INNER:
+if trans > 5
+C4 1
+else
+C5 1
+end
+C6 2
+`
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "parse should succeed")
+
+	fork_idx := chain_first(&parser, "INNER")
+	fork_event := seq.source_get(&parser.source, fork_idx)
+	fork, _ := fork_event.kind.(seq.Source_Fork)
+
+	c4_idx := fork_event.next
+	c4_event := seq.source_get(&parser.source, c4_idx)
+
+	c6_idx := c4_event.next
+	testing.expect(t, c6_idx != seq.NIL_SOURCE, "C4.next should reach the post-if event")
+	c6_event := seq.source_get(&parser.source, c6_idx)
+	_, is_post_note := c6_event.kind.(seq.Source_Note)
+	testing.expect(t, is_post_note)
+	testing.expect_value(t, c6_event.next, seq.NIL_SOURCE)
+
+	// Else-branch tail rejoins on the same C6 idx.
+	c5_idx := fork.else_first
+	c5_event := seq.source_get(&parser.source, c5_idx)
+	testing.expect_value(t, c5_event.next, c6_idx)
+}
+
+
+@(test)
+test_parse_fork_chain_else_branch_off_main :: proc(t: ^testing.T) {
+	// Sanity check: the else-branch must be reachable ONLY via
+	// fork.else_first. Walking parent.first via .next must never visit
+	// any else-branch event.
+	src := `INNER:
+if trans > 5
+C4 1
+else
+C5 1
+end
+C6 2
+`
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok)
+
+	inner_first := chain_first(&parser, "INNER")
+	fork, _ := seq.source_get(&parser.source, inner_first).kind.(seq.Source_Fork)
+	c5_idx := fork.else_first
+
+	walker := inner_first
+	for walker != seq.NIL_SOURCE {
+		testing.expect(t, walker != c5_idx, "main chain walk must not visit else-branch event")
+		walker = seq.source_get(&parser.source, walker).next
+	}
+}
+
+
 @(test)
 test_macro_basic :: proc(t: ^testing.T) {
 	parser := seq.make_parser()

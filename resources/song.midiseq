@@ -1,12 +1,35 @@
-KICK:
+MAJOR_CHORD:
 P1O3 1
+P3O3 1
+P5O3 1
+P7O3 1
 
-ON_EACH(t,d):
-$t! 1 
-ON_EACH($t,$d)! 2 trans=$d 
+UP(t,d,max):
+$t 
+if trans < $max
+    UP($t,$d,$max)! 2 trans=$d
+else
+    DOWN($t,$d,$max)! 2 trans=-$d 
+
+DOWN(t,d,max):
+$t 
+if trans > -$max
+    DOWN($t,$d,$max)! 2 trans=-$d
+else
+    UP($t,$d,$max)! 2 trans=$d 
+
+KICK:
+C2 1 
+C2 3
+C2 4.5 vel=10 chance=50
+KICK! 5
 
 SONG:
-ON_EACH(KICK,3d) chan=2 scale=CPm 
-SONG! 5
+KICK chan=3
+KICK 1.5 chan=3 trans=2 rate=2 
+KICK 2 chan=3 trans=6  
+UP(MAJOR_CHORD, 1d, 7d) scale=Dm chan=1 rate=2 trans=12
+UP(MAJOR_CHORD, 1d, 7d) scale=Dm chan=2 rate=1 
+SONG! 17
 
-SONG    
+SONG
