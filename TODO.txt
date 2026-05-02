@@ -1,10 +1,8 @@
 YES
-* cc events
+* cc events automation parameters
 * hand rolled midi abstraction layer
+* conditional expresssion || && 
 * CLI interface 
+* Array notation for notes and for scales
 
-
-Maybe
-* arithmatic expressions on macro parameters ?
-* CLI Visuals
 
