@@ -778,20 +778,21 @@ parse_ref_event_with_target :: proc(
 		case:
 			if mod_idx, is_mod := match_mod_name(arg_name); is_mod {
 				op_kind: Mod_Op_Kind
+				sign: i32 = 1
 				if has_value {
 					op_kind = .Set
-				} else {
-					if p.pos + 1 >= len(p.src) || p.src[p.pos] != '+' || p.src[p.pos + 1] != '=' {
-						parse_error(p, "%s requires '=N' or '+=N'", arg_name)
-						return false
-					}
+				} else if p.pos + 1 < len(p.src) && p.src[p.pos + 1] == '=' && (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
+					if p.src[p.pos] == '-' do sign = -1
 					p.pos += 2
 					p.col += 2
 					op_kind = .Add
+				} else {
+					parse_error(p, "%s requires '=N', '+=N', or '-=N'", arg_name)
+					return false
 				}
 				v, ok := parse_number(p)
 				if !ok {parse_error(p, "expected number for %s", arg_name); return false}
-				mod_ops[mod_idx] = Mod_Op{kind = op_kind, value = i32(v)}
+				mod_ops[mod_idx] = Mod_Op{kind = op_kind, value = sign * i32(v)}
 			} else {
 				parse_error(p, "unknown reference argument: %s", arg_name)
 				return false
@@ -1741,7 +1742,7 @@ is_kwarg_start :: proc(p: ^Parser) -> bool {
 	for pos < len(p.src) && (p.src[pos] == ' ' || p.src[pos] == '\t') do pos += 1
 	if pos >= len(p.src) do return false
 	if p.src[pos] == '=' do return true
-	if p.src[pos] == '+' && pos + 1 < len(p.src) && p.src[pos + 1] == '=' do return true
+	if (p.src[pos] == '+' || p.src[pos] == '-') && pos + 1 < len(p.src) && p.src[pos + 1] == '=' do return true
 	return false
 }
 

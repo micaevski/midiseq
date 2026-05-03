@@ -139,6 +139,49 @@ SONG
 }
 
 
+// Negative literals: `mod1=-N`, `mod1+=-N`, and the explicit `-=N`
+// subtractive operator all yield the same effect.
+@(test)
+test_cc_mod_negative_literals :: proc(t: ^testing.T) {
+	src := `INNER:
+CC1 1 val=50+mod1
+CC2 1 val=50+mod2
+CC3 1 val=50+mod3
+C-1 100
+
+SONG:
+INNER mod1=-10 mod2+=-20 mod3-=15
+C-1 100
+
+SONG
+`
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+	root, p_ok := seq.parse_source(&parser, src)
+	testing.expect(t, p_ok)
+
+	ts: CC_Sink
+	defer delete(ts.cc_events)
+	sink := make_cc_sink(&ts)
+	sequencer := seq.make_sequencer(sink)
+	defer seq.destroy_sequencer(sequencer)
+	seq.adapt_to_source(sequencer, &parser, root)
+	seq.start(sequencer)
+	for b in 0 ..< 3 {
+		seq.tick(sequencer, f32(b))
+	}
+	cc1, cc2, cc3: i32 = -1, -1, -1
+	for ev in ts.cc_events {
+		if ev.number == 1 do cc1 = ev.value
+		if ev.number == 2 do cc2 = ev.value
+		if ev.number == 3 do cc3 = ev.value
+	}
+	testing.expect_value(t, cc1, i32(40))
+	testing.expect_value(t, cc2, i32(30))
+	testing.expect_value(t, cc3, i32(35))
+}
+
+
 // Mods on independent registers don't interfere.
 @(test)
 test_cc_mod_independent_registers :: proc(t: ^testing.T) {

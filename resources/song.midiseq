@@ -1,34 +1,23 @@
-MAJOR_CHORD:
-P1O3 1
-P3O3 1
-
-
-UP(t,d,max):
+UP_DOWN(t,d,max):
 $t 
+CC74 val=mod1
 if trans < $max
-    UP($t,$d,$max)! 2 trans=$d
+    UP_DOWN($t,$d,$max)! 2 trans=$d mod1+=10
 else
-    DOWN($t,$d,$max)! 2 trans=-$d 
+    DOWN_UP($t,$d,$max)! 2 trans=-$d     
+ 
 
-DOWN(t,d,max):
-$t 
-if trans > -$max
-    DOWN($t,$d,$max)! 2 trans=-$d vel=-4
-else
-    UP($t,$d,$max)! 2 trans=$d vel=20
+DOWN_UP(t,d,max):
+$t
+CC74 val=mod1 
+if trans > -$max 
+    DOWN_UP($t,$d,$max)! 2 trans=-$d mod1-=10
+else    
+    UP_DOWN($t,$d,$max)! 2 trans=$d 
 
-KICK:
-C2 1 
-C2 3
-C2 4.5 vel=10 chance=50
-KICK! 5
 
-SONG:
-KICK chan=3
-KICK 1.5 chan=3 trans=2 rate=2 
-KICK 2 chan=3 trans=6  
-#UP(MAJOR_CHORD, 1d, 12d) scale=DPM chan=1 rate=2 trans=12
-UP(MAJOR_CHORD, 1d, 12d) scale=DP M chan=2 rate=2
-SONG! 33
+MELODY:
+P3O4 1
 
-SONG
+
+UP_DOWN(MELODY, 3d, 12)! chan=1 scale=GM

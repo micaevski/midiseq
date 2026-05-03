@@ -1,8 +1,10 @@
 YES
-* cc events automation parameters
+* Finish work on mod 
 * hand rolled midi abstraction layer
-* conditional expresssion || && 
-* CLI interface 
 * Array notation for notes and for scales
+* CLI interface 
+* conditional expresssion || && 
 
 
+BUGS??
+* Should looping timelines keep playing even though their original invokation was removed (the source defintion still exists).
