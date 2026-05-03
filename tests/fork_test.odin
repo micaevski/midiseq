@@ -568,3 +568,5 @@ SONG
 	_, ok := seq.parse_source(&parser, src)
 	testing.expect(t, !ok, "unknown operator should fail")
 }
+
+

@@ -781,7 +781,9 @@ parse_ref_event_with_target :: proc(
 				sign: i32 = 1
 				if has_value {
 					op_kind = .Set
-				} else if p.pos + 1 < len(p.src) && p.src[p.pos + 1] == '=' && (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
+				} else if p.pos + 1 < len(p.src) &&
+				   p.src[p.pos + 1] == '=' &&
+				   (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
 					if p.src[p.pos] == '-' do sign = -1
 					p.pos += 2
 					p.col += 2
@@ -792,7 +794,10 @@ parse_ref_event_with_target :: proc(
 				}
 				v, ok := parse_number(p)
 				if !ok {parse_error(p, "expected number for %s", arg_name); return false}
-				mod_ops[mod_idx] = Mod_Op{kind = op_kind, value = sign * i32(v)}
+				mod_ops[mod_idx] = Mod_Op {
+					kind  = op_kind,
+					value = sign * i32(v),
+				}
 			} else {
 				parse_error(p, "unknown reference argument: %s", arg_name)
 				return false
@@ -1116,27 +1121,21 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 // (else-branch); no synthetic timeline is allocated.
 @(private)
 parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
-	skip_inline_ws(p)
-	field_name, ok_f := parse_ident(p)
-	if !ok_f {
-		parse_error(p, "expected predicate field after 'if'")
-		return false
-	}
-	getter := lookup_predicate_getter(field_name)
-	if getter == nil {
-		parse_error(p, "unknown predicate field: %s (expected 'trans' or 'rate')", field_name)
+	lhs, ok_lhs := parse_predicate_side(p)
+	if !ok_lhs {
+		if len(p.last_error) == 0 do parse_error(p, "missing left side of predicate")
 		return false
 	}
 
-	op_proc, ok_op := parse_op_token(p)
+	op_kind, ok_op := parse_op_token(p)
 	if !ok_op {
 		parse_error(p, "expected comparison operator (>, <, ==, !=, >=, <=)")
 		return false
 	}
 
-	constant, ok_c := parse_number(p)
-	if !ok_c {
-		parse_error(p, "expected constant in predicate")
+	rhs, ok_rhs := parse_predicate_side(p)
+	if !ok_rhs {
+		if len(p.last_error) == 0 do parse_error(p, "missing right side of predicate")
 		return false
 	}
 
@@ -1168,9 +1167,9 @@ parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
 			beat = quantize(beat),
 			chance = 100,
 			kind = Source_Fork {
-				get = getter,
-				op = op_proc,
-				constant = constant,
+				lhs = lhs,
+				rhs = rhs,
+				op_kind = op_kind,
 				else_first = NIL_SOURCE,
 			},
 		},
@@ -1323,11 +1322,11 @@ parse_fork_branch :: proc(p: ^Parser, parent: Source_Index, saw_else: ^bool) -> 
 
 // Match a 1- or 2-character comparison operator at the current
 // position. Advances past it on success and returns the matching
-// op proc. Recognises >, <, ==, !=, >=, <=.
+// op kind. Recognises >, <, ==, !=, >=, <=.
 @(private)
-parse_op_token :: proc(p: ^Parser) -> (op: Predicate_Op, ok: bool) {
+parse_op_token :: proc(p: ^Parser) -> (kind: Predicate_Op_Kind, ok: bool) {
 	skip_inline_ws(p)
-	if p.pos >= len(p.src) do return nil, false
+	if p.pos >= len(p.src) do return {}, false
 	c := p.src[p.pos]
 	next_c: u8 = 0
 	if p.pos + 1 < len(p.src) do next_c = p.src[p.pos + 1]
@@ -1337,46 +1336,77 @@ parse_op_token :: proc(p: ^Parser) -> (op: Predicate_Op, ok: bool) {
 		if next_c == '=' {
 			p.pos += 2
 			p.col += 2
-			return op_geq, true
+			return .Geq, true
 		}
 		p.pos += 1
 		p.col += 1
-		return op_gt, true
+		return .Gt, true
 	case '<':
 		if next_c == '=' {
 			p.pos += 2
 			p.col += 2
-			return op_leq, true
+			return .Leq, true
 		}
 		p.pos += 1
 		p.col += 1
-		return op_lt, true
+		return .Lt, true
 	case '=':
 		if next_c == '=' {
 			p.pos += 2
 			p.col += 2
-			return op_eq, true
+			return .Eq, true
 		}
 	case '!':
 		if next_c == '=' {
 			p.pos += 2
 			p.col += 2
-			return op_neq, true
+			return .Neq, true
 		}
 	}
-	return nil, false
+	return {}, false
 }
 
 
 @(private)
-lookup_predicate_getter :: proc(name: string) -> Predicate_Getter {
+lookup_predicate_field :: proc(name: string) -> (field: Predicate_Field, ok: bool) {
 	switch name {
 	case "trans":
-		return get_trans_semitones
+		return .Trans, true
 	case "rate":
-		return get_rate
+		return .Rate, true
+	case "vel":
+		return .Velocity, true
+	case "mod1":
+		return .Mod1, true
+	case "mod2":
+		return .Mod2, true
+	case "mod3":
+		return .Mod3, true
+	case "mod4":
+		return .Mod4, true
 	}
-	return nil
+	return {}, false
+}
+
+
+@(private)
+parse_predicate_side :: proc(p: ^Parser) -> (side: Predicate_Side, ok: bool) {
+	skip_inline_ws(p)
+	if p.pos >= len(p.src) do return {}, false
+	c := p.src[p.pos]
+	if is_alpha(c) || c == '_' {
+		name, n_ok := parse_ident(p)
+		if !n_ok do return {}, false
+		f, f_ok := lookup_predicate_field(name)
+		if !f_ok {
+			parse_error(p, "unknown predicate field: %s (expected trans, rate, vel, or mod1..mod4)", name)
+			return {}, false
+		}
+		return f, true
+	}
+	n, n_ok := parse_number(p)
+	if !n_ok do return {}, false
+	return n, true
 }
 
 
@@ -1642,12 +1672,7 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 		Source_Event {
 			beat = quantize(beat),
 			chance = chance,
-			kind = Source_CC {
-				number = number,
-				value = val,
-				mod_idx = mod_idx,
-				channel = chan,
-			},
+			kind = Source_CC{number = number, value = val, mod_idx = mod_idx, channel = chan},
 		},
 	)
 	return true

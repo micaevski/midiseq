@@ -357,9 +357,9 @@ Source_Timeline :: struct {
 }
 
 Source_Fork :: struct {
-	get:        Predicate_Getter,
-	op:         Predicate_Op,
-	constant:   f32,
+	lhs:        Predicate_Side,
+	rhs:        Predicate_Side,
+	op_kind:    Predicate_Op_Kind,
 	else_first: Source_Index,
 }
 
@@ -383,6 +383,8 @@ Source_Event :: struct {
 	kind:   Source_Kind,
 	next:   Source_Index,
 }
+
+#assert(size_of(Source_Event) == 76)
 
 
 Runtime_Note :: struct {
@@ -408,24 +410,6 @@ Runtime_Kind :: union {
 	Runtime_Timeline,
 }
 
-
-Predicate_Getter :: proc(t: ^Runtime_Timeline) -> f32
-Predicate_Op :: proc(value, constant: f32) -> bool
-
-get_trans_semitones :: proc(t: ^Runtime_Timeline) -> f32 {
-	return f32(
-		i32(t.transposition.semitones) +
-		degrees_to_semitones(i32(t.transposition.degrees), t.scale),
-	)
-}
-get_rate :: proc(t: ^Runtime_Timeline) -> f32 {return t.rate}
-
-op_gt :: proc(a, b: f32) -> bool {return a > b}
-op_lt :: proc(a, b: f32) -> bool {return a < b}
-op_eq :: proc(a, b: f32) -> bool {return a == b}
-op_neq :: proc(a, b: f32) -> bool {return a != b}
-op_geq :: proc(a, b: f32) -> bool {return a >= b}
-op_leq :: proc(a, b: f32) -> bool {return a <= b}
 
 Runtime_Event :: struct {
 	beat:        f32,
@@ -693,8 +677,10 @@ play_timeline :: proc(
 		cursor_event := source_get(&sequencer.source, timeline.cursor)
 
 		if fork, is_fork := cursor_event.kind.(Source_Fork); is_fork {
-			timeline.cursor =
-				fork.op(fork.get(timeline), fork.constant) ? cursor_event.next : fork.else_first
+			lhs_val := predicate_side_value(fork.lhs, timeline)
+			rhs_val := predicate_side_value(fork.rhs, timeline)
+			matched := predicate_ops[fork.op_kind](lhs_val, rhs_val)
+			timeline.cursor = matched ? cursor_event.next : fork.else_first
 			continue
 		}
 
