@@ -332,11 +332,25 @@ Source_Note :: struct {
 	duration: f32, // in beats; note-off fires at start_beat + duration
 }
 
+MOD_COUNT :: 4
+
+Mod_Op_Kind :: enum u8 {
+	Nop,
+	Set,
+	Add,
+}
+
+Mod_Op :: struct {
+	kind:  Mod_Op_Kind,
+	value: i32,
+}
+
 Source_Timeline :: struct {
 	first:         Source_Index,
 	transposition: Transposition,
 	rate:          f32, // time-scale multiplier
 	velocity:      I32_Range, // additive offset applied to child notes; sampled on each spawn
+	mod_ops:       [MOD_COUNT]Mod_Op, // each mod register: nop / set / add applied at spawn
 	scale:         Scale, // zero-value (None) means "no scale set"
 	channel:       Maybe(u8),
 	free:          bool, // ref: spawn detaches from parent's lifecycle
@@ -351,7 +365,8 @@ Source_Fork :: struct {
 
 Source_CC :: struct {
 	number:  i32, // 0..127
-	value:   I32_Range, // 0..127; sampled on each emit
+	value:   I32_Range, // literal/range component sampled per emit
+	mod_idx: i8, // -1 = no mod ref; else 0..MOD_COUNT-1, value adds mods[mod_idx]
 	channel: Maybe(u8),
 }
 
@@ -383,6 +398,7 @@ Runtime_Timeline :: struct {
 	transposition: Transposition,
 	rate:          f32,
 	velocity:      i32,
+	mods:          [MOD_COUNT]i32,
 	scale:         Scale,
 	channel:       u8,
 }
@@ -397,7 +413,10 @@ Predicate_Getter :: proc(t: ^Runtime_Timeline) -> f32
 Predicate_Op :: proc(value, constant: f32) -> bool
 
 get_trans_semitones :: proc(t: ^Runtime_Timeline) -> f32 {
-	return f32(i32(t.transposition.semitones) + degrees_to_semitones(i32(t.transposition.degrees), t.scale))
+	return f32(
+		i32(t.transposition.semitones) +
+		degrees_to_semitones(i32(t.transposition.degrees), t.scale),
+	)
 }
 get_rate :: proc(t: ^Runtime_Timeline) -> f32 {return t.rate}
 
@@ -726,7 +745,13 @@ play_timeline :: proc(
 			}
 			sequencer.playing_notes[channel][number] = new_idx
 			sequencer.last_emit_beat[channel][number] = beat
-			sequencer.sink.note_on(&sequencer.sink, channel, number, clamp(sample_range(k.velocity) + timeline.velocity, 0, 127), beat)
+			sequencer.sink.note_on(
+				&sequencer.sink,
+				channel,
+				number,
+				clamp(sample_range(k.velocity) + timeline.velocity, 0, 127),
+				beat,
+			)
 
 		case Source_Timeline:
 			new_idx = runtime_alloc(&sequencer.runtime_pool)
@@ -737,6 +762,17 @@ play_timeline :: proc(
 			}
 			parent := timeline_event_idx
 			if k.free do parent = timeline_event.parent
+			child_mods := timeline.mods
+			for i in 0 ..< MOD_COUNT {
+				op := k.mod_ops[i]
+				switch op.kind {
+				case .Nop:
+				case .Set:
+					child_mods[i] = op.value
+				case .Add:
+					child_mods[i] += op.value
+				}
+			}
 			runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 			runtime_event.beat = beat
 			runtime_event.active_next = NIL_RUNTIME
@@ -746,18 +782,36 @@ play_timeline :: proc(
 				source_idx = timeline.cursor,
 				channel = k.channel.? or_else timeline.channel,
 				transposition = Transposition {
-					semitones = i16(clamp(i32(k.transposition.semitones) + i32(timeline.transposition.semitones), -127, 127)),
-					degrees = i16(clamp(i32(k.transposition.degrees) + i32(timeline.transposition.degrees), -127, 127)),
+					semitones = i16(
+						clamp(
+							i32(k.transposition.semitones) + i32(timeline.transposition.semitones),
+							-127,
+							127,
+						),
+					),
+					degrees = i16(
+						clamp(
+							i32(k.transposition.degrees) + i32(timeline.transposition.degrees),
+							-127,
+							127,
+						),
+					),
 				},
 				rate = clamp(k.rate * timeline.rate, 1.0 / 1024.0, 1024.0),
 				velocity = clamp(sample_range(k.velocity) + timeline.velocity, -127, 127),
+				mods = child_mods,
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
 			}
 
 		case Source_CC:
 			channel := i32(k.channel.? or_else timeline.channel)
 			if channel >= 0 && channel < 16 && k.number >= 0 && k.number < 128 {
-				sequencer.sink.cc(&sequencer.sink, channel, k.number, clamp(sample_range(k.value), 0, 127), beat)
+				mod_value: i32 = 0
+				if k.mod_idx >= 0 && k.mod_idx < MOD_COUNT {
+					mod_value = timeline.mods[k.mod_idx]
+				}
+				value := clamp(sample_range(k.value) + mod_value, 0, 127)
+				sequencer.sink.cc(&sequencer.sink, channel, k.number, value, beat)
 			}
 			timeline.cursor = cursor_event.next
 			continue

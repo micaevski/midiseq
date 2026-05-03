@@ -715,6 +715,7 @@ parse_ref_event_with_target :: proc(
 	chan: Maybe(u8)
 	free: bool = auto_free
 	scale: Scale
+	mod_ops: [MOD_COUNT]Mod_Op
 	for {
 		if at_line_end(p) do break
 
@@ -775,8 +776,26 @@ parse_ref_event_with_target :: proc(
 			}
 			chan = u8(ch - 1)
 		case:
-			parse_error(p, "unknown reference argument: %s", arg_name)
-			return false
+			if mod_idx, is_mod := match_mod_name(arg_name); is_mod {
+				op_kind: Mod_Op_Kind
+				if has_value {
+					op_kind = .Set
+				} else {
+					if p.pos + 1 >= len(p.src) || p.src[p.pos] != '+' || p.src[p.pos + 1] != '=' {
+						parse_error(p, "%s requires '=N' or '+=N'", arg_name)
+						return false
+					}
+					p.pos += 2
+					p.col += 2
+					op_kind = .Add
+				}
+				v, ok := parse_number(p)
+				if !ok {parse_error(p, "expected number for %s", arg_name); return false}
+				mod_ops[mod_idx] = Mod_Op{kind = op_kind, value = i32(v)}
+			} else {
+				parse_error(p, "unknown reference argument: %s", arg_name)
+				return false
+			}
 		}
 	}
 
@@ -795,6 +814,7 @@ parse_ref_event_with_target :: proc(
 				transposition = trans,
 				rate = rate,
 				velocity = vel,
+				mod_ops = mod_ops,
 				free = free,
 				scale = scale,
 			},
@@ -1577,6 +1597,7 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 	}
 
 	val: I32_Range = {0, 0}
+	mod_idx: i8 = -1
 	have_val := false
 	chance: i32 = 100
 	chan: Maybe(u8)
@@ -1590,9 +1611,10 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 
 		switch arg_name {
 		case "val":
-			r, ok := parse_int_range(p)
+			r, m, ok := parse_value_spec(p)
 			if !ok {parse_error(p, "expected value"); return false}
 			val = r
+			mod_idx = m
 			have_val = true
 		case "chance":
 			c, ok := parse_number(p)
@@ -1619,15 +1641,90 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 		Source_Event {
 			beat = quantize(beat),
 			chance = chance,
-			kind = Source_CC{number = number, value = val, channel = chan},
+			kind = Source_CC {
+				number = number,
+				value = val,
+				mod_idx = mod_idx,
+				channel = chan,
+			},
 		},
 	)
 	return true
 }
 
 
-// `name=...` form: returns true if the next token on the current line
-// is an ident immediately followed by `=`.
+// `mod1`..`mod9` → 0..8. Returns false otherwise. Currently MOD_COUNT
+// caps the actual valid range at 0..MOD_COUNT-1; the caller checks.
+@(private)
+match_mod_name :: proc(name: string) -> (i32, bool) {
+	if len(name) != 4 do return 0, false
+	if name[0] != 'm' || name[1] != 'o' || name[2] != 'd' do return 0, false
+	c := name[3]
+	if c < '1' || c > '9' do return 0, false
+	idx := i32(c - '1')
+	if idx >= MOD_COUNT do return 0, false
+	return idx, true
+}
+
+
+// CC `val=` accepts: `N`, `N-M`, `modK`, `N+modK`, `N-M+modK`. Returns
+// the literal range (zeroed if `modK` only) and the mod index (-1 if
+// none).
+@(private)
+parse_value_spec :: proc(p: ^Parser) -> (range: I32_Range, mod_idx: i8, ok: bool) {
+	mod_idx = -1
+	if mod, mok := try_parse_mod_ref(p); mok {
+		ok = true
+		mod_idx = i8(mod)
+		return
+	}
+	r, rok := parse_int_range(p)
+	if !rok do return
+	range = r
+	if p.pos < len(p.src) && p.src[p.pos] == '+' {
+		// reserve the position so we don't consume `+` if `mod` doesn't follow
+		save_pos := p.pos
+		save_col := p.col
+		p.pos += 1
+		p.col += 1
+		if mod, mok := try_parse_mod_ref(p); mok {
+			mod_idx = i8(mod)
+		} else {
+			p.pos = save_pos
+			p.col = save_col
+		}
+	}
+	ok = true
+	return
+}
+
+
+// If the cursor sits on `mod<digit>` (no trailing alnum), consume it
+// and return the index. Bounds-checked against MOD_COUNT.
+@(private)
+try_parse_mod_ref :: proc(p: ^Parser) -> (i32, bool) {
+	if p.pos + 3 >= len(p.src) do return 0, false
+	if p.src[p.pos] != 'm' || p.src[p.pos + 1] != 'o' || p.src[p.pos + 2] != 'd' do return 0, false
+	c := p.src[p.pos + 3]
+	if c < '1' || c > '9' do return 0, false
+	end := p.pos + 4
+	if end < len(p.src) {
+		nc := p.src[end]
+		if is_alpha(nc) || is_digit(nc) || nc == '_' do return 0, false
+	}
+	idx := i32(c - '1')
+	if idx >= MOD_COUNT {
+		parse_error(p, "mod%c out of range (max mod%d)", c, MOD_COUNT)
+		return 0, false
+	}
+	p.pos = end
+	p.col += 4
+	return idx, true
+}
+
+
+// `name=...` or `name+=...` form: returns true if the next token on
+// the current line is an ident immediately followed by `=` or `+=`.
 @(private)
 is_kwarg_start :: proc(p: ^Parser) -> bool {
 	if p.pos >= len(p.src) do return false
@@ -1642,7 +1739,10 @@ is_kwarg_start :: proc(p: ^Parser) -> bool {
 		}
 	}
 	for pos < len(p.src) && (p.src[pos] == ' ' || p.src[pos] == '\t') do pos += 1
-	return pos < len(p.src) && p.src[pos] == '='
+	if pos >= len(p.src) do return false
+	if p.src[pos] == '=' do return true
+	if p.src[pos] == '+' && pos + 1 < len(p.src) && p.src[pos + 1] == '=' do return true
+	return false
 }
 
 
@@ -1736,22 +1836,36 @@ skip_to_line_end :: proc(p: ^Parser) {
 	}
 }
 
-// Look ahead from the current position to see if the rest of the
-// current line contains a `:` outside of any string literal.
-// Used to disambiguate a header line from an event line.
+// Look ahead to see whether the current line is a definition header:
+// `IDENT[(params)]:` followed by only whitespace or a comment. Anything
+// else (event line, kwarg containing a `:`, etc.) returns false.
 @(private)
 peek_line_has_colon :: proc(p: ^Parser) -> bool {
 	pos := p.pos
-	in_string := false
+	if pos >= len(p.src) || !is_ident_start(p.src[pos]) do return false
+	pos += 1
 	for pos < len(p.src) {
 		c := p.src[pos]
-		if c == '\n' do return false
-		if c == '#' && !in_string do return false
-		if c == '"' do in_string = !in_string
-		if c == ':' && !in_string do return true
+		if !(is_alpha(c) || is_digit(c) || c == '_') do break
 		pos += 1
 	}
-	return false
+	if pos < len(p.src) && p.src[pos] == '(' {
+		pos += 1
+		for pos < len(p.src) && p.src[pos] != ')' && p.src[pos] != '\n' do pos += 1
+		if pos >= len(p.src) || p.src[pos] != ')' do return false
+		pos += 1
+	}
+	if pos >= len(p.src) || p.src[pos] != ':' do return false
+	pos += 1
+	for pos < len(p.src) {
+		c := p.src[pos]
+		if c == ' ' || c == '\t' || c == '\r' {
+			pos += 1
+			continue
+		}
+		return c == '\n' || c == '#'
+	}
+	return true
 }
 
 // Return true if `s` matches the note-name pattern (e.g. "C4", "Bb3").
