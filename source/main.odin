@@ -203,52 +203,6 @@ draw_gui :: proc(
 	devices: ^Midi_Devices,
 	config: ^Config,
 ) {
-	// Labels for the MIDI dropdowns. The dropdown widgets themselves
-	// are drawn at the END of the frame so their expanded option
-	// lists overlay every other widget instead of being painted
-	// over.
-	ui_draw_text("MIDI In", 20, 24, 14, rl.Color{180, 180, 200, 255})
-	ui_draw_text("MIDI Out", 380, 24, 14, rl.Color{180, 180, 200, 255})
-
-	// Lock all other gui controls while a dropdown is open so clicks
-	// inside the expanded list don't fall through to underlying
-	// buttons.
-	any_dropdown_open := ui.in_dropdown_open || ui.out_dropdown_open
-	if any_dropdown_open do rl.GuiLock()
-
-	if rl.GuiButton(rl.Rectangle{20, 60, 100, 40}, "Start") {
-		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-		if shift do transport_restart(sequencer, clock)
-		else do transport_play(sequencer, clock)
-	}
-	if rl.GuiButton(rl.Rectangle{140, 60, 100, 40}, "Pause") do transport_pause(sequencer, clock)
-	if rl.GuiButton(rl.Rectangle{260, 60, 100, 40}, "Stop") do transport_stop(sequencer, clock)
-	if rl.GuiButton(rl.Rectangle{380, 60, 100, 40}, "Edit") do open_in_editor(SONG_PATH)
-
-	clock_status := seq.clock_status(clock)
-	external := clock_status.mode == .External
-	rl.GuiCheckBox(rl.Rectangle{500, 70, 20, 20}, "External Clock", &external)
-	new_mode: seq.Clock_Mode = .External if external else .Internal
-	if new_mode != clock_status.mode {
-		seq.clock_set_mode(clock, new_mode)
-		config.external_clock = external
-		config_save(config, CONFIG_PATH)
-	}
-	if external {
-		status: cstring = clock_status.external_running ? "running" : "stopped"
-		label := fmt.ctprintf("ext: %.1f BPM (%s)", clock_status.bpm_ema, status)
-		ui_draw_text(label, 640, 74, 14, rl.Color{180, 180, 200, 255})
-	}
-
-	tempo := clock_status.tempo
-	tempo_label := fmt.ctprintf("%.0f BPM", tempo)
-	rl.GuiSlider(rl.Rectangle{120, 120, 280, 20}, "Tempo", tempo_label, &tempo, 40, 240)
-	if tempo != clock_status.tempo do seq.clock_set_tempo(clock, tempo)
-	if rl.IsMouseButtonReleased(.LEFT) && tempo != config.tempo {
-		config.tempo = tempo
-		config_save(config, CONFIG_PATH)
-	}
-
 	// Dashboard occupies the top DASHBOARD_H px and stays fixed; the
 	// viz area below stretches with the window.
 	DASHBOARD_H :: f32(180)
@@ -257,9 +211,56 @@ draw_gui :: proc(
 	screen_w := f32(rl.GetScreenWidth())
 	screen_h := f32(rl.GetScreenHeight())
 
+	// Labels for the MIDI dropdowns. The dropdown widgets themselves
+	// are drawn at the END of the frame so their expanded option
+	// lists overlay every other widget instead of being painted
+	// over.
+	ui_draw_text("MIDI In", 140, 24, 14, rl.Color{180, 180, 200, 255})
+	ui_draw_text("MIDI Out", i32(screen_w) - 440, 24, 14, rl.Color{180, 180, 200, 255})
+
+	// Lock all other gui controls while a dropdown is open so clicks
+	// inside the expanded list don't fall through to underlying
+	// buttons.
+	any_dropdown_open := ui.in_dropdown_open || ui.out_dropdown_open
+	if any_dropdown_open do rl.GuiLock()
+
+	clock_status := seq.clock_status(clock)
+	external := clock_status.mode == .External
+	rl.GuiCheckBox(rl.Rectangle{20, 22, 20, 20}, "Ext Sync", &external)
+	new_mode: seq.Clock_Mode = .External if external else .Internal
+	if new_mode != clock_status.mode {
+		seq.clock_set_mode(clock, new_mode)
+		config.external_clock = external
+		config_save(config, CONFIG_PATH)
+	}
+	if external {
+		status: cstring = clock_status.external_running ? "running" : "stopped"
+		label := fmt.ctprintf("%.1f BPM (%s)", clock_status.bpm_ema, status)
+		ui_draw_text(label, 20, 48, 12, rl.Color{180, 180, 200, 255})
+	}
+
+	if rl.GuiButton(rl.Rectangle{20, 70, 40, 40}, rl.GuiIconText(.ICON_PLAYER_PLAY, "")) {
+		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+		if shift do transport_restart(sequencer, clock)
+		else do transport_play(sequencer, clock)
+	}
+	if rl.GuiButton(rl.Rectangle{70, 70, 40, 40}, rl.GuiIconText(.ICON_PLAYER_PAUSE, "")) do transport_pause(sequencer, clock)
+	if rl.GuiButton(rl.Rectangle{120, 70, 40, 40}, rl.GuiIconText(.ICON_PLAYER_STOP, "")) do transport_stop(sequencer, clock)
+
+	if rl.GuiButton(rl.Rectangle{screen_w - 90, 18, 70, 28}, "Edit") do open_in_editor(SONG_PATH)
+
+	tempo := clock_status.tempo
+	tempo_label := fmt.ctprintf("%.0f BPM", tempo)
+	rl.GuiSlider(rl.Rectangle{220, 130, 280, 20}, "Tempo", tempo_label, &tempo, 40, 240)
+	if tempo != clock_status.tempo do seq.clock_set_tempo(clock, tempo)
+	if rl.IsMouseButtonReleased(.LEFT) && tempo != config.tempo {
+		config.tempo = tempo
+		config_save(config, CONFIG_PATH)
+	}
+
 	draw_beat_counter(
 		seq.sequencer_beat(sequencer),
-		rl.Rectangle{screen_w - BEAT_W - 20, 60, BEAT_W, 100},
+		rl.Rectangle{(screen_w - BEAT_W) / 2, 50, BEAT_W, 100},
 	)
 
 	viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
@@ -335,7 +336,7 @@ draw_gui :: proc(
 
 	in_prev := ui.in_active
 	if rl.GuiDropdownBox(
-		rl.Rectangle{80, 18, 280, 28},
+		rl.Rectangle{200, 18, 280, 28},
 		in_text,
 		&ui.in_active,
 		ui.in_dropdown_open,
@@ -350,7 +351,7 @@ draw_gui :: proc(
 
 	out_prev := ui.out_active
 	if rl.GuiDropdownBox(
-		rl.Rectangle{450, 18, 280, 28},
+		rl.Rectangle{screen_w - 380, 18, 280, 28},
 		out_text,
 		&ui.out_active,
 		ui.out_dropdown_open,
