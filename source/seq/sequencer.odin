@@ -11,6 +11,7 @@ import "core:mem"
 
 DEFAULT_POOL_BYTES :: 100_000 * size_of(Runtime_Event)
 NAMES_ARENA_BYTES :: 16 * 1024
+NAMES_MAP_CAP :: 512
 
 STEPS_PER_BEAT :: 4096
 BEAT_QUANTUM :: f32(1.0) / f32(STEPS_PER_BEAT)
@@ -67,7 +68,7 @@ make_sequencer :: proc(sink: Sink, pool_bytes: int = DEFAULT_POOL_BYTES) -> Sequ
 
 
 destroy_sequencer :: proc(s: Sequencer_Handle) {
-	delete(s.source)
+	delete(s.source.data)
 	runtime_pool_destroy(&s.runtime_pool)
 	destroy_names(&s.names)
 	free(s)
@@ -286,8 +287,8 @@ sequencer_memory :: proc(s: Sequencer_Handle) -> Memory_Status {
 	return Memory_Status {
 		runtime_in_use = int(s.runtime_pool.in_use),
 		runtime_capacity = runtime_pool_capacity(&s.runtime_pool),
-		source_in_use = len(s.source) - 1,
-		source_capacity = cap(s.source) - 1,
+		source_in_use = s.source.len - 1,
+		source_capacity = len(s.source.data) - 1,
 	}
 }
 
@@ -302,7 +303,7 @@ Sequencer :: struct {
 	source_root:    Source_Index,
 	active_head:    Runtime_Index,
 	active_tail:    Runtime_Index,
-	source:         [dynamic]Source_Event,
+	source:         Source_Store,
 	runtime_pool:   Runtime_Pool,
 	sink:           Sink,
 	names:          Names,
@@ -438,23 +439,34 @@ sample_range :: proc(r: I32_Range) -> i32 {
 }
 
 
-make_source_store :: proc(capacity: int) -> [dynamic]Source_Event {
-	return make([dynamic]Source_Event, 1, capacity) // len=1 reserves slot 0
+Source_Store :: struct {
+	data: []Source_Event,
+	len:  int,
 }
 
-source_store_reset :: proc(s: ^[dynamic]Source_Event) {
-	resize(s, 1)
-	s[0] = {}
+make_source_store :: proc(capacity: int) -> Source_Store {
+	s := Source_Store {
+		data = make([]Source_Event, capacity),
+		len  = 1, // slot 0 reserved as NIL_SOURCE sentinel
+	}
+	return s
 }
 
-source_alloc :: proc(s: ^[dynamic]Source_Event) -> Source_Index {
-	if len(s) >= cap(s) do return NIL_SOURCE
-	append(s, Source_Event{})
-	return Source_Index(len(s) - 1)
+source_store_reset :: proc(s: ^Source_Store) {
+	s.len = 1
+	s.data[0] = {}
 }
 
-source_get :: proc(s: ^[dynamic]Source_Event, index: Source_Index) -> ^Source_Event {
-	return &s[index]
+source_alloc :: proc(s: ^Source_Store) -> Source_Index {
+	if s.len >= len(s.data) do return NIL_SOURCE
+	s.data[s.len] = {}
+	idx := s.len
+	s.len += 1
+	return Source_Index(idx)
+}
+
+source_get :: proc(s: ^Source_Store, index: Source_Index) -> ^Source_Event {
+	return &s.data[index]
 }
 
 
@@ -462,8 +474,8 @@ make_names :: proc() -> Names {
 	n := Names{}
 	n.arena_buf = make([]byte, NAMES_ARENA_BYTES)
 	mem.arena_init(&n.arena, n.arena_buf)
-	n.lookup = make(map[Source_Index]string, 32)
-	n.by_name = make(map[string]Source_Index, 16)
+	n.lookup = make(map[Source_Index]string, NAMES_MAP_CAP)
+	n.by_name = make(map[string]Source_Index, NAMES_MAP_CAP)
 	return n
 }
 
@@ -482,7 +494,7 @@ names_reset :: proc(n: ^Names) {
 
 
 add_source_event_chain :: proc(
-	s: ^[dynamic]Source_Event,
+	s: ^Source_Store,
 	head: ^Source_Index,
 	tail: ^Source_Index,
 	event: Source_Event,
@@ -516,7 +528,7 @@ add_source_event_chain :: proc(
 }
 
 add_source_event :: proc(
-	s: ^[dynamic]Source_Event,
+	s: ^Source_Store,
 	parent: Source_Index,
 	event: Source_Event,
 ) -> Source_Index {
@@ -546,7 +558,7 @@ remap_idx :: proc(
 
 @(private)
 remap_cursor :: proc(
-	old_src, new_src: ^[dynamic]Source_Event,
+	old_src, new_src: ^Source_Store,
 	old_head, new_head: Source_Index,
 	target: Source_Index,
 ) -> Source_Index {
@@ -557,7 +569,7 @@ remap_cursor :: proc(
 
 @(private)
 first_cursor_after :: proc(
-	s: ^[dynamic]Source_Event,
+	s: ^Source_Store,
 	head: Source_Index,
 	local_time: f32,
 ) -> Source_Index {
@@ -572,7 +584,7 @@ first_cursor_after :: proc(
 
 @(private)
 remap_walk :: proc(
-	old_src, new_src: ^[dynamic]Source_Event,
+	old_src, new_src: ^Source_Store,
 	old_walker, new_walker: Source_Index,
 	target: Source_Index,
 	visited: ^map[Source_Index]bool,

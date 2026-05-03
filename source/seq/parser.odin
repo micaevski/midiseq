@@ -25,7 +25,7 @@ import "core:strings"
 // sequencer (and so `adapt_to_source` doesn't need to know about the
 // parser at all).
 Parser :: struct {
-	source:                 [dynamic]Source_Event,
+	source:                 Source_Store,
 	names:                  Names,
 	seed:                   u64,
 	src:                    string,
@@ -86,7 +86,7 @@ make_parser :: proc(pool_bytes: int = DEFAULT_POOL_BYTES) -> Parser {
 }
 
 destroy_parser :: proc(p: ^Parser) {
-	delete(p.source)
+	delete(p.source.data)
 	destroy_names(&p.names)
 	delete(p.scratch_buf)
 	p^ = {}
