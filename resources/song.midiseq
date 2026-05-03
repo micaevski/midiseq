@@ -1,23 +1,23 @@
-UP_DOWN(t,d,max):
+UP_DOWN(t,d,max,CC):
 $t 
-CC74 val=mod1
+$CC val=mod1
 if trans < $max
-    UP_DOWN($t,$d,$max)! 2 trans=$d mod1+=10
+    UP_DOWN($t,$d,$max, $CC)! 2 trans=$d mod1+=20
 else
-    DOWN_UP($t,$d,$max)! 2 trans=-$d     
+    DOWN_UP($t,$d,$max,$CC)! 2 trans=-$d     
  
 
-DOWN_UP(t,d,max):
+DOWN_UP(t,d,max, CC):
 $t
-CC74 val=mod1 
+$CC val=mod1 
 if trans > -$max 
-    DOWN_UP($t,$d,$max)! 2 trans=-$d mod1-=10
+    DOWN_UP($t,$d,$max,$CC)! 2 trans=-$d mod1-=20
 else    
-    UP_DOWN($t,$d,$max)! 2 trans=$d 
+    UP_DOWN($t,$d,$max,$CC)! 2 trans=$d 
 
 
 MELODY:
 P3O4 1
 
 
-UP_DOWN(MELODY, 3d, 12)! chan=1 scale=GM
+UP_DOWN(MELODY, 1d, 24, CC74)! chan=1 scale=GPM
