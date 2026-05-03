@@ -9,6 +9,7 @@ import rl "vendor:raylib"
 
 SONG_PATH :: "resources/song.midiseq"
 TEMP_ARENA_BYTES :: 1 * 1024 * 1024
+SLAB_BYTES :: 32 * 1024 * 1024
 
 
 open_in_editor :: proc(path: string) {
@@ -401,6 +402,12 @@ main :: proc() {
 		config.external_clock = false
 		config_save(&config, CONFIG_PATH)
 	}
+
+	slab_buf := make([]byte, SLAB_BYTES)
+	defer delete(slab_buf)
+	slab_arena: mem.Arena
+	mem.arena_init(&slab_arena, slab_buf)
+	context.allocator = mem.arena_allocator(&slab_arena)
 
 	sequencer := seq.make_sequencer(midi_sink(&midi))
 	defer seq.destroy_sequencer(sequencer)
