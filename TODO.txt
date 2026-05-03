@@ -4,6 +4,7 @@ YES
 * Array notation for notes and for scales
 * CLI interface 
 * conditional expresssion || && 
+* top level defs not getting revaluated if not looped
 
 
 BUGS??
