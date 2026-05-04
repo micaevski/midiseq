@@ -27,10 +27,13 @@ NIL_RUNTIME :: Runtime_Index(0)
 // note crosses an on/off boundary. `beat` is the musical time the
 // event was scheduled at.
 Sink :: struct {
-	user:     rawptr,
-	note_on:  proc(user: rawptr, channel, number, velocity: i32, beat: f32),
-	note_off: proc(user: rawptr, channel, number: i32, beat: f32),
-	cc:       proc(user: rawptr, channel, number, value: i32, beat: f32),
+	user:      rawptr,
+	note_on:   proc(user: rawptr, channel, number, velocity: i32, beat: f32),
+	note_off:  proc(user: rawptr, channel, number: i32, beat: f32),
+	cc:        proc(user: rawptr, channel, number, value: i32, beat: f32),
+	on_spawn:  proc(user: rawptr, parent_rt_idx, rt_idx: Runtime_Index, ev: Runtime_Event, beat: f32, note_velocity: i32),
+	on_retire: proc(user: rawptr, rt_idx: Runtime_Index, beat: f32),
+	on_reset:  proc(user: rawptr),
 }
 
 
@@ -77,6 +80,8 @@ destroy_sequencer :: proc(s: Sequencer_Handle) {
 
 @(private)
 reset_runtime_state :: proc(sequencer: Sequencer_Handle) {
+	if sequencer.sink.on_reset != nil do sequencer.sink.on_reset(&sequencer.sink)
+
 	sequencer.beat = 0
 	sequencer.runtime_error = {}
 
@@ -181,6 +186,9 @@ tick :: proc(sequencer: Sequencer_Handle, beat: f32) {
 
 		next_index := event.active_next
 		if finished {
+			if sequencer.sink.on_retire != nil {
+				sequencer.sink.on_retire(&sequencer.sink, current_index, sequencer.beat)
+			}
 			if previous_index == NIL_RUNTIME {
 				sequencer.active_head = next_index
 			} else {
@@ -282,6 +290,12 @@ sequencer_beat :: proc(s: Sequencer_Handle) -> f32 {
 
 sequencer_runtime_error :: proc(s: Sequencer_Handle) -> Runtime_Error {
 	return s.runtime_error
+}
+
+sequencer_name :: proc(s: Sequencer_Handle, idx: Source_Index) -> string {
+	name, ok := s.names.lookup[idx]
+	if ok do return name
+	return ""
 }
 
 sequencer_memory :: proc(s: Sequencer_Handle) -> Memory_Status {
@@ -726,6 +740,7 @@ play_timeline :: proc(
 				timeline.cursor = cursor_event.next
 				continue
 			}
+			velocity := clamp(sample_range(k.velocity) + timeline.velocity, 0, 127)
 			runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 			runtime_event.beat = beat
 			runtime_event.active_next = NIL_RUNTIME
@@ -741,13 +756,10 @@ play_timeline :: proc(
 			}
 			sequencer.playing_notes[channel][number] = new_idx
 			sequencer.last_emit_beat[channel][number] = beat
-			sequencer.sink.note_on(
-				&sequencer.sink,
-				channel,
-				number,
-				clamp(sample_range(k.velocity) + timeline.velocity, 0, 127),
-				beat,
-			)
+			sequencer.sink.note_on(&sequencer.sink, channel, number, velocity, beat)
+			if sequencer.sink.on_spawn != nil {
+				sequencer.sink.on_spawn(&sequencer.sink, timeline_event_idx, new_idx, runtime_event^, beat, velocity)
+			}
 
 		case Source_Timeline:
 			new_idx = runtime_alloc(&sequencer.runtime_pool)
@@ -781,6 +793,9 @@ play_timeline :: proc(
 				velocity = child_vel,
 				mods = child_mods,
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
+			}
+			if sequencer.sink.on_spawn != nil {
+				sequencer.sink.on_spawn(&sequencer.sink, parent, new_idx, runtime_event^, beat, 0)
 			}
 
 		case Source_CC:
