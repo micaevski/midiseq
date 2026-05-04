@@ -49,6 +49,7 @@ Parser :: struct {
 Pending_Tail :: struct {
 	parent: Source_Index,
 	tail:   Source_Index,
+	chain:  ^Source_Index,
 }
 
 
@@ -617,7 +618,7 @@ parser_add_event :: proc(p: ^Parser, parent: Source_Index, event: Source_Event) 
 	if new_idx == NIL_SOURCE do return NIL_SOURCE
 	i := 0
 	for i < len(p.pending_tails) {
-		if p.pending_tails[i].parent == parent {
+		if p.pending_tails[i].parent == parent && p.pending_tails[i].chain == p.sub_chain_head {
 			tail_idx := p.pending_tails[i].tail
 			source_get(&p.source, tail_idx).next = new_idx
 			ordered_remove(&p.pending_tails, i)
@@ -1272,7 +1273,7 @@ parse_if_block :: proc(p: ^Parser, parent: Source_Index) -> bool {
 
 		(&source_get(&p.source, fork_idx).kind.(Source_Fork)).else_first = else_head
 		if else_tail != NIL_SOURCE {
-			append(&p.pending_tails, Pending_Tail{parent = parent, tail = else_tail})
+			append(&p.pending_tails, Pending_Tail{parent = parent, tail = else_tail, chain = p.sub_chain_head})
 		}
 	}
 	return true
