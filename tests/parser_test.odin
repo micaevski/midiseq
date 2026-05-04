@@ -390,3 +390,84 @@ SONG
 	testing.expect(t, ok, "memoized macro invocations should parse")
 	testing.expect_value(t, len(parser.macro_instances), 2)
 }
+
+
+@(test)
+test_macro_param_spread_self_call :: proc(t: ^testing.T) {
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+
+	src := `ROLL(n, dv):
+$n
+ROLL(...)! 2 trans=$dv
+
+SONG:
+ROLL(C3, 1)
+
+SONG
+`
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "(...) self-call sugar should parse and memoize")
+	testing.expect_value(t, len(parser.macro_instances), 1)
+}
+
+
+@(test)
+test_macro_param_spread_cross_call :: proc(t: ^testing.T) {
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+
+	src := `UP(t, d):
+$t
+DOWN(...)! 2 trans=$d
+
+DOWN(t, d):
+$t
+UP(...)! 2 trans=-$d
+
+SONG:
+UP(C3, 1)
+
+SONG
+`
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "(...) cross-macro forwarding should parse")
+}
+
+
+@(test)
+test_macro_param_spread_with_whitespace :: proc(t: ^testing.T) {
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+
+	src := `M(p):
+$p
+M( ... )! 2
+
+SONG:
+M(C3)
+
+SONG
+`
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "whitespace inside ( ... ) should be tolerated")
+}
+
+
+@(test)
+test_macro_param_spread_does_not_affect_explicit_calls :: proc(t: ^testing.T) {
+	parser := seq.make_parser()
+	defer seq.destroy_parser(&parser)
+
+	src := `M(p, q):
+P1O$p 1
+M($p, $q)! 2
+
+SONG:
+M(3, 2)
+
+SONG
+`
+	_, ok := seq.parse_source(&parser, src)
+	testing.expect(t, ok, "explicit (a, b) form should be unaffected by the spread sugar")
+}

@@ -709,8 +709,10 @@ parse_ref_event_with_target :: proc(
 	}
 
 	trans: Transposition
+	trans_op: Mod_Op_Kind
 	rate: f32 = 1
 	vel: I32_Range = {0, 0}
+	vel_op: Mod_Op_Kind
 	chance: i32 = 100
 	chan: Maybe(u8)
 	free: bool = auto_free
@@ -731,17 +733,20 @@ parse_ref_event_with_target :: proc(
 
 		switch arg_name {
 		case "trans":
-			if !has_value {parse_error(p, "trans requires '=value'"); return false}
+			op_kind, sign, ok_op := parse_op_assignment(p, arg_name, has_value)
+			if !ok_op do return false
 			v, ok := parse_number(p)
 			if !ok {parse_error(p, "expected transposition"); return false}
+			val := sign * i32(v)
 			// `trans=2d` writes scale degrees; `trans=2` writes semitones.
 			if p.pos < len(p.src) && p.src[p.pos] == 'd' {
 				p.pos += 1
 				p.col += 1
-				trans.degrees = i16(v)
+				trans.degrees = i8(val)
 			} else {
-				trans.semitones = i16(v)
+				trans.semitones = i8(val)
 			}
+			trans_op = op_kind
 		case "rate":
 			if !has_value {parse_error(p, "rate requires '=value'"); return false}
 			v, ok := parse_number(p)
@@ -749,10 +754,14 @@ parse_ref_event_with_target :: proc(
 			if v <= 0 {parse_error(p, "rate must be positive, got %.3g", v); return false}
 			rate = v
 		case "vel":
-			if !has_value {parse_error(p, "vel requires '=value'"); return false}
+			op_kind, sign, ok_op := parse_op_assignment(p, arg_name, has_value)
+			if !ok_op do return false
 			r, ok := parse_int_range(p)
 			if !ok {parse_error(p, "expected velocity"); return false}
-			vel = r
+			vel.lo = sign * r.lo
+			vel.hi = sign * r.hi
+			if vel.hi < vel.lo do vel.lo, vel.hi = vel.hi, vel.lo
+			vel_op = op_kind
 		case "chance":
 			if !has_value {parse_error(p, "chance requires '=value'"); return false}
 			c, ok := parse_number(p)
@@ -777,26 +786,13 @@ parse_ref_event_with_target :: proc(
 			chan = u8(ch - 1)
 		case:
 			if mod_idx, is_mod := match_mod_name(arg_name); is_mod {
-				op_kind: Mod_Op_Kind
-				sign: i32 = 1
-				if has_value {
-					op_kind = .Set
-				} else if p.pos + 1 < len(p.src) &&
-				   p.src[p.pos + 1] == '=' &&
-				   (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
-					if p.src[p.pos] == '-' do sign = -1
-					p.pos += 2
-					p.col += 2
-					op_kind = .Add
-				} else {
-					parse_error(p, "%s requires '=N', '+=N', or '-=N'", arg_name)
-					return false
-				}
+				op_kind, sign, ok_op := parse_op_assignment(p, arg_name, has_value)
+				if !ok_op do return false
 				v, ok := parse_number(p)
 				if !ok {parse_error(p, "expected number for %s", arg_name); return false}
 				mod_ops[mod_idx] = Mod_Op {
 					kind  = op_kind,
-					value = sign * i32(v),
+					value = i16(clamp(sign * i32(v), -32768, 32767)),
 				}
 			} else {
 				parse_error(p, "unknown reference argument: %s", arg_name)
@@ -818,8 +814,11 @@ parse_ref_event_with_target :: proc(
 				first = target,
 				channel = chan,
 				transposition = trans,
+				transposition_op = trans_op,
 				rate = rate,
-				velocity = vel,
+				velocity_lo = i8(clamp(vel.lo, -127, 127)),
+				velocity_hi = i8(clamp(vel.hi, -127, 127)),
+				velocity_op = vel_op,
 				mod_ops = mod_ops,
 				free = free,
 				scale = scale,
@@ -966,8 +965,69 @@ parse_macro_arg_list :: proc(p: ^Parser) -> (args: []string, ok: bool) {
 // is left intact (will produce a downstream parse error).
 @(private)
 substitute_macro_params :: proc(p: ^Parser, def: Macro_Def, args: []string) -> string {
+	desugared := desugar_param_spread(def.body, def.params)
+	return substitute_params(desugared, def.params, args)
+}
+
+
+@(private)
+desugar_param_spread :: proc(body: string, params: []string) -> string {
 	sb := strings.builder_make()
-	body := def.body
+	i := 0
+	for i < len(body) {
+		c := body[i]
+		if c == '"' {
+			strings.write_byte(&sb, c)
+			i += 1
+			for i < len(body) && body[i] != '"' {
+				strings.write_byte(&sb, body[i])
+				i += 1
+			}
+			if i < len(body) {
+				strings.write_byte(&sb, body[i])
+				i += 1
+			}
+			continue
+		}
+		if c == '#' {
+			for i < len(body) && body[i] != '\n' {
+				strings.write_byte(&sb, body[i])
+				i += 1
+			}
+			continue
+		}
+		if c == '(' {
+			j := i + 1
+			for j < len(body) && (body[j] == ' ' || body[j] == '\t') do j += 1
+			if j + 2 < len(body) && body[j] == '.' && body[j + 1] == '.' && body[j + 2] == '.' {
+				k := j + 3
+				for k < len(body) && (body[k] == ' ' || body[k] == '\t') do k += 1
+				if k < len(body) && body[k] == ')' {
+					strings.write_byte(&sb, '(')
+					for n in 0 ..< len(params) {
+						if n > 0 do strings.write_byte(&sb, ',')
+						strings.write_byte(&sb, '$')
+						strings.write_string(&sb, params[n])
+					}
+					strings.write_byte(&sb, ')')
+					i = k + 1
+					continue
+				}
+			}
+			strings.write_byte(&sb, c)
+			i += 1
+			continue
+		}
+		strings.write_byte(&sb, c)
+		i += 1
+	}
+	return strings.to_string(sb)
+}
+
+
+@(private)
+substitute_params :: proc(body: string, params, args: []string) -> string {
+	sb := strings.builder_make()
 	i := 0
 	for i < len(body) {
 		if body[i] == '$' && i + 1 < len(body) && is_ident_start(body[i + 1]) {
@@ -979,8 +1039,8 @@ substitute_macro_params :: proc(p: ^Parser, def: Macro_Def, args: []string) -> s
 			}
 			pname := body[i + 1:j]
 			arg_idx := -1
-			for k in 0 ..< len(def.params) {
-				if def.params[k] == pname {
+			for k in 0 ..< len(params) {
+				if params[k] == pname {
 					arg_idx = k
 					break
 				}
@@ -988,8 +1048,6 @@ substitute_macro_params :: proc(p: ^Parser, def: Macro_Def, args: []string) -> s
 			if arg_idx >= 0 {
 				strings.write_string(&sb, args[arg_idx])
 			} else {
-				// Unknown placeholder — leave as-is so the recursive
-				// parse surfaces a meaningful error at the right line.
 				strings.write_byte(&sb, '$')
 				strings.write_string(&sb, pname)
 			}
@@ -1676,6 +1734,37 @@ parse_cc_event :: proc(p: ^Parser, parent: Source_Index, number: i32) -> bool {
 		},
 	)
 	return true
+}
+
+
+@(private)
+parse_op_assignment :: proc(
+	p: ^Parser,
+	kwarg: string,
+	has_value: bool,
+) -> (
+	kind: Mod_Op_Kind,
+	sign: i32,
+	ok: bool,
+) {
+	sign = 1
+	if has_value {
+		kind = .Set
+		ok = true
+		return
+	}
+	if p.pos + 1 < len(p.src) &&
+	   p.src[p.pos + 1] == '=' &&
+	   (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
+		if p.src[p.pos] == '-' do sign = -1
+		p.pos += 2
+		p.col += 2
+		kind = .Add
+		ok = true
+		return
+	}
+	parse_error(p, "%s requires '=value', '+=value', or '-=value'", kwarg)
+	return
 }
 
 

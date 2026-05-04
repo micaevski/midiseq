@@ -52,8 +52,8 @@ Scale :: struct {
 
 
 Transposition :: struct {
-	semitones: i16,
-	degrees:   i16,
+	semitones: i8,
+	degrees:   i8,
 }
 
 

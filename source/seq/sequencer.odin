@@ -110,7 +110,7 @@ start :: proc(sequencer: Sequencer_Handle) {
 		channel       = 0,
 		transposition = source_timeline.transposition,
 		rate          = source_timeline.rate,
-		velocity      = sample_range(source_timeline.velocity),
+		velocity      = sample_i8_range(source_timeline.velocity_lo, source_timeline.velocity_hi),
 		scale         = source_timeline.scale,
 	}
 	root_event.active_next = NIL_RUNTIME
@@ -335,26 +335,18 @@ Source_Note :: struct {
 
 MOD_COUNT :: 4
 
-Mod_Op_Kind :: enum u8 {
-	Nop,
-	Set,
-	Add,
-}
-
-Mod_Op :: struct {
-	kind:  Mod_Op_Kind,
-	value: i32,
-}
-
 Source_Timeline :: struct {
-	first:         Source_Index,
-	transposition: Transposition,
-	rate:          f32, // time-scale multiplier
-	velocity:      I32_Range, // additive offset applied to child notes; sampled on each spawn
-	mod_ops:       [MOD_COUNT]Mod_Op, // each mod register: nop / set / add applied at spawn
-	scale:         Scale, // zero-value (None) means "no scale set"
-	channel:       Maybe(u8),
-	free:          bool, // ref: spawn detaches from parent's lifecycle
+	first:            Source_Index,
+	transposition:    Transposition,
+	transposition_op: Mod_Op_Kind,
+	rate:             f32,
+	velocity_lo:      i8,
+	velocity_hi:      i8,
+	velocity_op:      Mod_Op_Kind,
+	mod_ops:          [MOD_COUNT]Mod_Op,
+	scale:            Scale,
+	channel:          Maybe(u8),
+	free:             bool,
 }
 
 Source_Fork :: struct {
@@ -385,7 +377,7 @@ Source_Event :: struct {
 	next:   Source_Index,
 }
 
-#assert(size_of(Source_Event) == 76)
+#assert(size_of(Source_Event) == 56)
 
 
 Runtime_Note :: struct {
@@ -436,6 +428,11 @@ quantize :: proc(t: f32) -> f32 {
 sample_range :: proc(r: I32_Range) -> i32 {
 	if r.hi <= r.lo do return r.lo
 	return r.lo + i32(rand.int_max(int(r.hi - r.lo + 1)))
+}
+
+sample_i8_range :: proc(lo, hi: i8) -> i32 {
+	if hi <= lo do return i32(lo)
+	return i32(lo) + i32(rand.int_max(int(hi - lo + 1)))
 }
 
 
@@ -762,15 +759,14 @@ play_timeline :: proc(
 			if k.free do parent = timeline_event.parent
 			child_mods := timeline.mods
 			for i in 0 ..< MOD_COUNT {
-				op := k.mod_ops[i]
-				switch op.kind {
-				case .Nop:
-				case .Set:
-					child_mods[i] = op.value
-				case .Add:
-					child_mods[i] += op.value
-				}
+				child_mods[i] = apply_ops[k.mod_ops[i].kind](timeline.mods[i], i32(k.mod_ops[i].value))
 			}
+			trans_op := apply_ops[k.transposition_op]
+			child_trans := Transposition {
+				semitones = i8(clamp(trans_op(i32(timeline.transposition.semitones), i32(k.transposition.semitones)), -127, 127)),
+				degrees   = i8(clamp(trans_op(i32(timeline.transposition.degrees), i32(k.transposition.degrees)), -127, 127)),
+			}
+			child_vel := i32(clamp(apply_ops[k.velocity_op](timeline.velocity, sample_i8_range(k.velocity_lo, k.velocity_hi)), -127, 127))
 			runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 			runtime_event.beat = beat
 			runtime_event.active_next = NIL_RUNTIME
@@ -779,24 +775,9 @@ play_timeline :: proc(
 				cursor = k.first,
 				source_idx = timeline.cursor,
 				channel = k.channel.? or_else timeline.channel,
-				transposition = Transposition {
-					semitones = i16(
-						clamp(
-							i32(k.transposition.semitones) + i32(timeline.transposition.semitones),
-							-127,
-							127,
-						),
-					),
-					degrees = i16(
-						clamp(
-							i32(k.transposition.degrees) + i32(timeline.transposition.degrees),
-							-127,
-							127,
-						),
-					),
-				},
+				transposition = child_trans,
 				rate = clamp(k.rate * timeline.rate, 1.0 / 1024.0, 1024.0),
-				velocity = clamp(sample_range(k.velocity) + timeline.velocity, -127, 127),
+				velocity = child_vel,
 				mods = child_mods,
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
 			}
