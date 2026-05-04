@@ -260,35 +260,28 @@ midi_end_frame :: proc(midi: ^Midi_IO, dt: f32) {
 }
 
 
-// Adaptor: wrap this Midi_IO as a seq.Sink the sequencer can emit through.
-// "No output device open" is a normal state owned by this backend, so we
-// silently drop the emit at the boundary.
-midi_sink :: proc(midi: ^Midi_IO) -> seq.Sink {
-	on :: proc(user: rawptr, channel, number, velocity: i32, beat: f32) {
-		midi := cast(^Midi_IO)(cast(^seq.Sink)user).user
-		if midi.out_stream == nil do return
-		pm.WriteShort(
-			midi.out_stream,
-			0,
-			pm.MessageMake(0x90 | c.int(channel), c.int(number), c.int(velocity)),
-		)
-		midi.events_in_frame += 1
-	}
-	off :: proc(user: rawptr, channel, number: i32, beat: f32) {
-		midi := cast(^Midi_IO)(cast(^seq.Sink)user).user
-		if midi.out_stream == nil do return
-		pm.WriteShort(midi.out_stream, 0, pm.MessageMake(0x80 | c.int(channel), c.int(number), 0))
-		midi.events_in_frame += 1
-	}
-	cc :: proc(user: rawptr, channel, number, value: i32, beat: f32) {
-		midi := cast(^Midi_IO)(cast(^seq.Sink)user).user
-		if midi.out_stream == nil do return
-		pm.WriteShort(
-			midi.out_stream,
-			0,
-			pm.MessageMake(0xB0 | c.int(channel), c.int(number), c.int(value)),
-		)
-		midi.events_in_frame += 1
-	}
-	return seq.Sink{user = midi, note_on = on, note_off = off, cc = cc}
+midi_send_note_on :: proc(midi: ^Midi_IO, channel, number, velocity: i32) {
+	if midi.out_stream == nil do return
+	pm.WriteShort(
+		midi.out_stream,
+		0,
+		pm.MessageMake(0x90 | c.int(channel), c.int(number), c.int(velocity)),
+	)
+	midi.events_in_frame += 1
+}
+
+midi_send_note_off :: proc(midi: ^Midi_IO, channel, number: i32) {
+	if midi.out_stream == nil do return
+	pm.WriteShort(midi.out_stream, 0, pm.MessageMake(0x80 | c.int(channel), c.int(number), 0))
+	midi.events_in_frame += 1
+}
+
+midi_send_cc :: proc(midi: ^Midi_IO, channel, number, value: i32) {
+	if midi.out_stream == nil do return
+	pm.WriteShort(
+		midi.out_stream,
+		0,
+		pm.MessageMake(0xB0 | c.int(channel), c.int(number), c.int(value)),
+	)
+	midi.events_in_frame += 1
 }

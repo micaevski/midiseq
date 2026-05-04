@@ -203,6 +203,7 @@ draw_gui :: proc(
 	midi: ^Midi_IO,
 	devices: ^Midi_Devices,
 	config: ^Config,
+	vis: ^Vis_State,
 ) {
 	// Dashboard occupies the top DASHBOARD_H px and stays fixed; the
 	// viz area below stretches with the window.
@@ -265,6 +266,7 @@ draw_gui :: proc(
 	)
 
 	viz_area := rl.Rectangle{20, DASHBOARD_H, screen_w - 40, screen_h - DASHBOARD_H - FOOTER_H}
+	vis_draw(vis, sequencer, viz_area)
 	if ui.show_debug {
 		CARD_W :: f32(200)
 		CARD_H :: f32(100)
@@ -409,7 +411,8 @@ main :: proc() {
 	mem.arena_init(&slab_arena, slab_buf)
 	context.allocator = mem.arena_allocator(&slab_arena)
 
-	sequencer := seq.make_sequencer(midi_sink(&midi))
+	app: App
+	sequencer := seq.make_sequencer(app_sink(&app))
 	defer seq.destroy_sequencer(sequencer)
 
 	clock := seq.make_clock(config.tempo, .External if config.external_clock else .Internal)
@@ -417,6 +420,13 @@ main :: proc() {
 
 	parser := seq.make_parser()
 	defer seq.destroy_parser(&parser)
+
+	vis: Vis_State
+	vis_init(&vis, 100_000, seq.sequencer_memory(sequencer).runtime_capacity)
+	defer vis_destroy(&vis)
+
+	app.midi = &midi
+	app.vis = &vis
 
 	reload_song(sequencer, &parser, SONG_PATH)
 
@@ -488,7 +498,7 @@ main :: proc() {
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
-		draw_gui(&ui, sequencer, clock, &parser, &midi, &devices, &config)
+		draw_gui(&ui, sequencer, clock, &parser, &midi, &devices, &config, &vis)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
