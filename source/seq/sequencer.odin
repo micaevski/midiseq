@@ -15,6 +15,7 @@ NAMES_MAP_CAP :: 512
 
 STEPS_PER_BEAT :: 4096
 BEAT_QUANTUM :: f32(1.0) / f32(STEPS_PER_BEAT)
+MAX_RATE :: f32(128.0)
 
 
 Source_Index :: distinct u32
@@ -776,7 +777,7 @@ play_timeline :: proc(
 				source_idx = timeline.cursor,
 				channel = k.channel.? or_else timeline.channel,
 				transposition = child_trans,
-				rate = clamp(k.rate * timeline.rate, 1.0 / 1024.0, 1024.0),
+				rate = clamp(k.rate * timeline.rate, 1.0 / MAX_RATE, MAX_RATE),
 				velocity = child_vel,
 				mods = child_mods,
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,
