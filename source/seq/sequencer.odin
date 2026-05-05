@@ -115,8 +115,8 @@ start :: proc(sequencer: Sequencer_Handle) {
 		source_idx    = sequencer.source_root,
 		channel       = 0,
 		transposition = source_timeline.transposition,
-		rate          = source_timeline.rate,
-		velocity      = sample_i8_range(source_timeline.velocity_lo, source_timeline.velocity_hi),
+		rate          = 1,
+		velocity      = 0,
 		scale         = source_timeline.scale,
 	}
 	root_event.active_next = NIL_RUNTIME
@@ -354,11 +354,9 @@ Source_Timeline :: struct {
 	first:            Source_Index,
 	transposition:    Transposition,
 	transposition_op: Mod_Op_Kind,
-	rate:             f32,
-	velocity_lo:      i8,
-	velocity_hi:      i8,
-	velocity_op:      Mod_Op_Kind,
-	mod_ops:          [MOD_COUNT]Mod_Op,
+	rate:             Op,
+	velocity:         Op,
+	mods:             [MOD_COUNT]Op,
 	scale:            Scale,
 	channel:          Maybe(u8),
 	free:             bool,
@@ -392,7 +390,6 @@ Source_Event :: struct {
 	next:   Source_Index,
 }
 
-#assert(size_of(Source_Event) == 56)
 
 
 Runtime_Note :: struct {
@@ -772,14 +769,14 @@ play_timeline :: proc(
 			if k.free do parent = timeline_event.parent
 			child_mods := timeline.mods
 			for i in 0 ..< MOD_COUNT {
-				child_mods[i] = apply_ops[k.mod_ops[i].kind](timeline.mods[i], i32(k.mod_ops[i].value))
+				child_mods[i] = apply_op_i32(timeline.mods[i], k.mods[i], timeline)
 			}
 			trans_op := apply_ops[k.transposition_op]
 			child_trans := Transposition {
 				semitones = i8(clamp(trans_op(i32(timeline.transposition.semitones), i32(k.transposition.semitones)), -127, 127)),
 				degrees   = i8(clamp(trans_op(i32(timeline.transposition.degrees), i32(k.transposition.degrees)), -127, 127)),
 			}
-			child_vel := i32(clamp(apply_ops[k.velocity_op](timeline.velocity, sample_i8_range(k.velocity_lo, k.velocity_hi)), -127, 127))
+			child_vel := clamp(apply_op_i32(timeline.velocity, k.velocity, timeline), -127, 127)
 			runtime_event := runtime_get(&sequencer.runtime_pool, new_idx)
 			runtime_event.beat = beat
 			runtime_event.active_next = NIL_RUNTIME
@@ -789,7 +786,7 @@ play_timeline :: proc(
 				source_idx = timeline.cursor,
 				channel = k.channel.? or_else timeline.channel,
 				transposition = child_trans,
-				rate = clamp(k.rate * timeline.rate, 1.0 / MAX_RATE, MAX_RATE),
+				rate = clamp(apply_op(timeline.rate, k.rate, timeline), 1.0 / MAX_RATE, MAX_RATE),
 				velocity = child_vel,
 				mods = child_mods,
 				scale = k.scale.kind != .None ? k.scale : timeline.scale,

@@ -173,9 +173,7 @@ parse_source_internal :: proc(parser: ^Parser, src: string) -> (root: Source_Ind
 	}
 	root_event := source_get(&parser.source, root)
 	root_event.chance = 100
-	root_event.kind = Source_Timeline {
-		rate = 1,
-	}
+	root_event.kind = Source_Timeline{}
 	root_name, _ := strings.clone(ROOT_NAME, mem.arena_allocator(&parser.names.arena))
 	parser.names.lookup[root] = root_name
 	parser.names.by_name[root_name] = root
@@ -332,9 +330,7 @@ pass_1 :: proc(p: ^Parser) -> bool {
 			}
 			top_event := source_get(&p.source, idx)
 			top_event.chance = 100
-			top_event.kind = Source_Timeline {
-				rate = 1,
-			}
+			top_event.kind = Source_Timeline{}
 			p.names.by_name[name] = idx
 			if !expect(p, ':') do return false
 			continue
@@ -711,14 +707,13 @@ parse_ref_event_with_target :: proc(
 
 	trans: Transposition
 	trans_op: Mod_Op_Kind
-	rate: f32 = 1
-	vel: I32_Range = {0, 0}
-	vel_op: Mod_Op_Kind
+	rate: Op
+	vel: Op
 	chance: i32 = 100
 	chan: Maybe(u8)
 	free: bool = auto_free
 	scale: Scale
-	mod_ops: [MOD_COUNT]Mod_Op
+	mods: [MOD_COUNT]Op
 	for {
 		if at_line_end(p) do break
 
@@ -749,20 +744,19 @@ parse_ref_event_with_target :: proc(
 			}
 			trans_op = op_kind
 		case "rate":
-			if !has_value {parse_error(p, "rate requires '=value'"); return false}
-			v, ok := parse_number(p)
-			if !ok {parse_error(p, "expected rate"); return false}
-			if v <= 0 {parse_error(p, "rate must be positive, got %.3g", v); return false}
-			rate = v
+			op_kind, sign, ok_op := parse_op_assignment(p, arg_name, has_value)
+			if !ok_op do return false
+			// Legacy: bare `rate=N` means multiply (parent × N), to preserve old behavior.
+			if op_kind == .Set do op_kind = .Mul
+			op, op_ok := parse_op_value(p, op_kind, sign)
+			if !op_ok {parse_error(p, "expected rate or field"); return false}
+			rate = op
 		case "vel":
 			op_kind, sign, ok_op := parse_op_assignment(p, arg_name, has_value)
 			if !ok_op do return false
-			r, ok := parse_int_range(p)
-			if !ok {parse_error(p, "expected velocity"); return false}
-			vel.lo = sign * r.lo
-			vel.hi = sign * r.hi
-			if vel.hi < vel.lo do vel.lo, vel.hi = vel.hi, vel.lo
-			vel_op = op_kind
+			op, op_ok := parse_op_value(p, op_kind, sign)
+			if !op_ok {parse_error(p, "expected velocity or field"); return false}
+			vel = op
 		case "chance":
 			if !has_value {parse_error(p, "chance requires '=value'"); return false}
 			c, ok := parse_number(p)
@@ -789,12 +783,9 @@ parse_ref_event_with_target :: proc(
 			if mod_idx, is_mod := match_mod_name(arg_name); is_mod {
 				op_kind, sign, ok_op := parse_op_assignment(p, arg_name, has_value)
 				if !ok_op do return false
-				v, ok := parse_number(p)
-				if !ok {parse_error(p, "expected number for %s", arg_name); return false}
-				mod_ops[mod_idx] = Mod_Op {
-					kind  = op_kind,
-					value = i16(clamp(sign * i32(v), -32768, 32767)),
-				}
+				op, op_ok := parse_op_value(p, op_kind, sign)
+				if !op_ok {parse_error(p, "expected number or field for %s", arg_name); return false}
+				mods[mod_idx] = op
 			} else {
 				parse_error(p, "unknown reference argument: %s", arg_name)
 				return false
@@ -817,10 +808,8 @@ parse_ref_event_with_target :: proc(
 				transposition = trans,
 				transposition_op = trans_op,
 				rate = rate,
-				velocity_lo = i8(clamp(vel.lo, -127, 127)),
-				velocity_hi = i8(clamp(vel.hi, -127, 127)),
-				velocity_op = vel_op,
-				mod_ops = mod_ops,
+				velocity = vel,
+				mods = mods,
 				free = free,
 				scale = scale,
 			},
@@ -1118,9 +1107,7 @@ parse_macro_invocation :: proc(p: ^Parser, name: string, parent: Source_Index) -
 	}
 	inst := source_get(&p.source, inst_idx)
 	inst.chance = 100
-	inst.kind = Source_Timeline {
-		rate = 1,
-	}
+	inst.kind = Source_Timeline{}
 	append(&p.macro_instances, inst_idx)
 	p.macro_instances_by_key[key] = inst_idx
 
@@ -1756,15 +1743,36 @@ parse_op_assignment :: proc(
 	}
 	if p.pos + 1 < len(p.src) &&
 	   p.src[p.pos + 1] == '=' &&
-	   (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
-		if p.src[p.pos] == '-' do sign = -1
+	   (p.src[p.pos] == '+' || p.src[p.pos] == '-' || p.src[p.pos] == '*') {
+		op_char := p.src[p.pos]
+		if op_char == '-' do sign = -1
 		p.pos += 2
 		p.col += 2
-		kind = .Add
+		kind = op_char == '*' ? .Mul : .Add
 		ok = true
 		return
 	}
-	parse_error(p, "%s requires '=value', '+=value', or '-=value'", kwarg)
+	parse_error(p, "%s requires '=value', '+=value', '-=value', or '*=value'", kwarg)
+	return
+}
+
+
+// Parse the RHS of a kwarg op into an Op. Accepts either a literal number
+// or a Predicate_Field name (e.g. `mod1`, `rate`). For literals the sign
+// is folded into the operand; for field refs it sets the negate flag.
+@(private)
+parse_op_value :: proc(p: ^Parser, kind: Mod_Op_Kind, sign: i32) -> (op: Op, ok: bool) {
+	side, side_ok := parse_predicate_side(p)
+	if !side_ok do return
+	op.kind = kind
+	switch v in side {
+	case f32:
+		op.operand = f32(sign) * v
+	case Predicate_Field:
+		op.operand = v
+		op.negate = sign < 0
+	}
+	ok = true
 	return
 }
 
