@@ -252,19 +252,26 @@ adapt_to_source :: proc(sequencer: Sequencer_Handle, parser: ^Parser, new_root: 
 				old_first :=
 					source_get(&sequencer.source, t.source_idx).kind.(Source_Timeline).first
 				new_first := source_get(&parser.source, new_parent).kind.(Source_Timeline).first
-				new_cursor := remap_cursor(
+				visited := make(map[Source_Index]bool, 16, context.temp_allocator)
+				defer delete(visited)
+				new_cursor := remap_walk(
 					&sequencer.source,
 					&parser.source,
 					old_first,
 					new_first,
 					t.cursor,
+					&visited,
 				)
 				if new_cursor == NIL_SOURCE {
-					new_cursor = first_cursor_after(
-						&parser.source,
-						new_first,
-						(sequencer.beat - event.beat) * t.rate,
-					)
+					local_time := (sequencer.beat - event.beat) * t.rate
+					for walker := new_first; walker != NIL_SOURCE; {
+						ev := source_get(&parser.source, walker)
+						if ev.beat > local_time {
+							new_cursor = walker
+							break
+						}
+						walker = ev.next
+					}
 				}
 				t.source_idx = new_parent
 				t.cursor = new_cursor
@@ -564,32 +571,6 @@ remap_idx :: proc(
 	return new_idx, true
 }
 
-
-@(private)
-remap_cursor :: proc(
-	old_src, new_src: ^Source_Store,
-	old_head, new_head: Source_Index,
-	target: Source_Index,
-) -> Source_Index {
-	visited := make(map[Source_Index]bool, 16, context.temp_allocator)
-	defer delete(visited)
-	return remap_walk(old_src, new_src, old_head, new_head, target, &visited)
-}
-
-@(private)
-first_cursor_after :: proc(
-	s: ^Source_Store,
-	head: Source_Index,
-	local_time: f32,
-) -> Source_Index {
-	walker := head
-	for walker != NIL_SOURCE {
-		ev := source_get(s, walker)
-		if ev.beat > local_time do return walker
-		walker = ev.next
-	}
-	return NIL_SOURCE
-}
 
 @(private)
 remap_walk :: proc(

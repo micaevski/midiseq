@@ -1,13 +1,27 @@
-ROLL(n,dv):
-$n vel=4
-if vel == 64
-ROLL(...)! 2 vel+=$dv rate=2
+ROLL(n):
+$n 
+if mod1 < 16
+    ROLL(...)! 2 mod1+=1 trans+=1d 
 else
-ROLL(...)! 2 vel+=$dv
+    ROLL(...)! 2 trans-=1d  
+
+
+CHORD: 
+P1       
+P3 
+P5
+p7
+
+    
+BASSSSSS:
+P1O3 
+P5O4 3
+BASSSSSS! 4 
 
 
 SONG: 
-ROLL(F2, 4) chan=3 rate=2 
-SONG! 17
+BASSSSSS chan=2 rate=2
+ROLL(CHORD) chan=1 scale=FM
+SONG! 33 
 
-SONG
+SONG    
