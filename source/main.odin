@@ -458,7 +458,7 @@ main :: proc() {
 			switch {
 			case shift:
 				transport_play(sequencer, clock)
-			case seq.clock_status(clock).playing:
+			case seq.clock_is_running(clock):
 				transport_pause(sequencer, clock)
 			case:
 				transport_restart(sequencer, clock)

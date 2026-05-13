@@ -30,7 +30,7 @@ Clock_Handle :: ^Clock
 Clock_Status :: struct {
 	mode:             Clock_Mode,
 	external_running: bool, // External-only: DAW transport is rolling. Always false in Internal.
-	playing:          bool, // local play/pause state (driven by user)
+	running:          bool, // local play/pause state (driven by user)
 	beat:             f32,
 	tempo:            f32,
 	bpm_ema:          f32, // smoothed inferred tempo from MIDI clock pulses
@@ -65,12 +65,12 @@ clock_process_event :: proc(c: Clock_Handle, event: Clock_Event, data: i32, now:
 		c.last_pulse_t = now
 	case .Start:
 		c.pulses = 0
-		c.external_running = true
 		c.beat = 0
+		fallthrough
 	case .Continue:
-		c.external_running = true
+		c.running = true
 	case .Stop:
-		c.external_running = false
+		c.running = false
 	case .Song_Position:
 		c.pulses = u32(data) * 6
 		c.beat = f32(c.pulses) / 24.0
@@ -81,7 +81,7 @@ clock_process_event :: proc(c: Clock_Handle, event: Clock_Event, data: i32, now:
 clock_tick :: proc(c: Clock_Handle, dt: f32) {
 	switch c.mode {
 	case .Internal:
-		if c.playing do c.beat += dt * c.tempo / 60.0
+		if c.running do c.beat += dt * c.tempo / 60.0
 	case .External:
 		c.beat = f32(c.pulses) / 24.0
 		if c.bpm_ema > 0 do c.tempo = c.bpm_ema
@@ -92,15 +92,14 @@ clock_tick :: proc(c: Clock_Handle, dt: f32) {
 // True when the clock should be driving the sequencer: the user has
 // pressed play, and (in External mode) the DAW transport is rolling.
 clock_is_running :: proc(c: Clock_Handle) -> bool {
-	return c.playing && (c.mode == .Internal || c.external_running)
+	return c.running
 }
 
 
 clock_status :: proc(c: Clock_Handle) -> Clock_Status {
 	return Clock_Status {
 		mode = c.mode,
-		external_running = c.external_running,
-		playing = c.playing,
+		running = c.running,
 		beat = c.beat,
 		tempo = c.tempo,
 		bpm_ema = c.bpm_ema,
@@ -115,14 +114,14 @@ clock_set_mode :: proc(c: Clock_Handle, mode: Clock_Mode) {
 	c.mode = mode
 }
 
-clock_set_playing :: proc(c: Clock_Handle, playing: bool) {
-	c.playing = playing
+clock_set_playing :: proc(c: Clock_Handle, running: bool) {
+	if c.mode == .Internal || running do c.running = running
 }
 
-// Send the clock back to beat 0. Leaves mode/tempo/playing/external
+// Send the clock back to beat 0. Leaves mode/tempo/running/external
 // transport state alone — callers (GUI Stop, restart-from-scratch
 // keyboard shortcut) decide how to combine this with seq.start /
-// silence / playing toggles.
+// silence / running toggles.
 clock_reset :: proc(c: Clock_Handle) {
 	c.beat = 0
 	c.pulses = 0
@@ -138,12 +137,11 @@ clock_reset :: proc(c: Clock_Handle) {
 // MIDI clock pulses (PPQN = 24, so beat = pulses / 24).
 @(private)
 Clock :: struct {
-	mode:             Clock_Mode,
-	beat:             f32,
-	tempo:            f32,
-	pulses:           u32,
-	external_running: bool,
-	playing:          bool,
-	last_pulse_t:     f64,
-	bpm_ema:          f32,
+	mode:         Clock_Mode,
+	beat:         f32,
+	tempo:        f32,
+	pulses:       u32,
+	running:      bool,
+	last_pulse_t: f64,
+	bpm_ema:      f32,
 }

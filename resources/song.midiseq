@@ -9,7 +9,7 @@ else
 CHORD: 
 P1       
 P3 
-P5
+P5  
 p7
 
     
@@ -20,8 +20,8 @@ BASSSSSS! 4
 
 
 SONG: 
-BASSSSSS chan=2 rate=2
+BASSSSSS chan=2 rate=2 
 ROLL(CHORD) chan=1 scale=FM
 SONG! 33 
 
-SONG    
+SONG     
